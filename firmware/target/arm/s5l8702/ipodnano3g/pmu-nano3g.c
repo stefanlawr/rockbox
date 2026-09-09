@@ -334,12 +334,20 @@ int pmu_wr(int address, unsigned char val)
 
 void pmu_preinit(void)
 {
+#ifndef PMU_SKIP_TBC
+    /* Experiment hook: build with -DPMU_SKIP_TBC to leave the PMU in its
+       power-on state (as the boot ROM / DFU does) for NAND bring-up. */
     // TBC: LDOs ???
     pmu_wr(0x1b, 0x14);
     pmu_wr(0x16, 0x14);
     pmu_wr(0x15, 0x14);     // TBC: Vnand = 2000 + val*50 = 3000 mV
     pmu_wr(0x18, 0x18);     // TBC TBC TBC: Vaccy = 3200 mV ???
-    pmu_wr(0x10, (pmu_rd(0x10) & 0xdb) | 0x8);  // TBC: bit4 is related to NAND, LDO_0x15 on/off ???
+    /* Power-on value of reg 0x10 is 0xDF. The previous mask 0xDB cleared
+       bit 2, which removes power from the NAND: with bit 2 clear the NAND
+       data bus reads 0x00 and READ ID returns zeros; with the register
+       left at its power-on value the NAND answers (verified 2026-09-09 on
+       an MB245). Keep bit 2 set. Bit 5 is already clear at power-on. */
+    pmu_wr(0x10, (pmu_rd(0x10) & 0xdf) | 0x8);  // TBC: bit2 = NAND supply enable
 
                             // TBC: 0x30, 0x31 y 0x32 seems related to ADC (norboot)
     pmu_wr(0x34, 0x72);     // TBC: en DA9030: TBATHIGH (0-255, TBAT high temperature threshold
@@ -348,6 +356,7 @@ void pmu_preinit(void)
     pmu_wr(0x21, 0x5c);     // TBC: CHRG_CTL (max. current and Vbat ???)
     pmu_wr(0xb, 0x6);
     pmu_wr(0x1d, 0);
+#endif
 
     /* configure and clear interrupts */
     pmu_wr_multiple(D1671_REG_IRQMASKA, 2, "\x42\xBE");

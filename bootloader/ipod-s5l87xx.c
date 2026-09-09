@@ -58,6 +58,9 @@
 #if defined(IPOD_6G) || defined(IPOD_NANO3G)
 #include "norboot-target.h"
 #endif
+#ifdef IPOD_NANO3G
+#include "nand-nano3g.h"
+#endif
 
 
 #define ERR_RB      0
@@ -677,9 +680,181 @@ static void dump_bootflash(void)
 #endif /* HAVE_SERIAL */
 #endif /* IPOD_6G || IPOD_NANO3G */
 
+#ifdef IPOD_NANO3G
+/* Read-only NAND probe: chip IDs on one controller, then a page from
+   block 1 (where the Whimory VFL context lives) and page 0. Everything
+   is polled with timeouts so a hang shows the last line reached. */
+static void nand_probe_ctrl(int ctrl)
+{
+    uint8_t id[8];
+    uint32_t spare[NAND3G_SPARE_WORDS];
+    uint32_t raw;
+    int rc;
+
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("NAND probe, controller %d", ctrl);
+
+    nand3g_hw_init(ctrl);
+    printf("clocks+gpio ok");
+    /* GPIO groups 8..10 carry the NAND bus; show config, data and pulls
+       so they can be compared with the boot ROM / DFU state. */
+    for (int g = 8; g <= 10; g++)
+        printf("g%d con %08lx dat %02lx un %02lx %02lx %02lx", g,
+               (unsigned long)PCON(g), (unsigned long)(PDAT(g) & 0xff),
+               (unsigned long)(PUNA(g) & 0xff), (unsigned long)(PUNB(g) & 0xff),
+               (unsigned long)(PUNC(g) & 0xff));
+    printf("pmu 10:%02x 15:%02x 16:%02x 18:%02x 1b:%02x",
+           pmu_read(0x10), pmu_read(0x15), pmu_read(0x16),
+           pmu_read(0x18), pmu_read(0x1b));
+    printf("pmu 2e:%02x 30:%02x 32:%02x 34:%02x 36:%02x 38:%02x 3a:%02x",
+           pmu_read(0x2e), pmu_read(0x30), pmu_read(0x32), pmu_read(0x34),
+           pmu_read(0x36), pmu_read(0x38), pmu_read(0x3a));
+
+    for (int ce = 0; ce < NAND3G_NUM_CE; ce++) {
+        rc = nand3g_reset(ctrl, ce);
+        if (rc) {
+            printf("ce%d reset err %d", ce, rc);
+            continue;
+        }
+        rc = nand3g_read_id(ctrl, ce, id);
+        if (rc) {
+            printf("ce%d id err %d", ce, rc);
+            continue;
+        }
+        printf("ce%d id %02x %02x %02x %02x %02x %02x", ce,
+               id[0], id[1], id[2], id[3], id[4], id[5]);
+    }
+    printf("stat %08lx fifo %08lx sto %lu", (unsigned long)nand3g_dbg_stat,
+           (unsigned long)nand3g_dbg_fifo,
+           (unsigned long)nand3g_dbg_status_timeouts);
+
+    uint8_t *buf = nand3g_page_buffer();
+    const uint32_t pages[] = { 128, 152, 0 };
+    for (unsigned i = 0; i < ARRAYLEN(pages); i++) {
+        memset(buf, 0xAA, 32);
+        rc = nand3g_read_page(ctrl, 0, pages[i], buf, spare, &raw);
+        if (rc < 0) {
+            printf("pg %lu: err %d", (unsigned long)pages[i], rc);
+            continue;
+        }
+        printf("pg %lu: ecc %d raw %08lx", (unsigned long)pages[i], rc,
+               (unsigned long)raw);
+        printf(" sp %08lx %08lx %08lx", (unsigned long)spare[0],
+               (unsigned long)spare[1], (unsigned long)spare[2]);
+        printf(" %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+               buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+               buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
+    }
+
+    /* Second pass: bisect the GPIO table. In DFU (where the NAND works and
+       its data bus idles at 0xFF) every GPIO group except 8..10 is at its
+       reset state (all inputs). Rockbox's gpio_preinit drives many pins.
+       Restore one group at a time to the DFU state and watch the NAND
+       data bus (PDAT(8)) come back up. Values captured with wInd3x dump. */
+    if (ctrl == 0) {
+        static const uint32_t dfu_con[16] = {
+            0x00002221, 0, 0, 0, 0, 0, 0, 0,
+            0x22222222, 0x00020002, 0x00002222, 0, 0, 0, 0, 0 };
+        static const uint8_t dfu_punc[16] = {
+            0x00, 0xfc, 0x0f, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0xf0, 0xff, 0x03, 0x30 };
+        printf("gpio bisect, dat8 now %02lx:", (unsigned long)(PDAT(8) & 0xff));
+        PCON(9)  = dfu_con[9];
+        PCON(10) = dfu_con[10];
+        /* Per-pin bisect (GPIO ruled out on 2026-09-09: no single pin
+           brings the bus up). Kept behind NAND3G_GPIO_BISECT. */
+#ifdef NAND3G_GPIO_BISECT
+        int found_g = -1, found_p = -1;
+        uint8_t upmask[16];
+        for (int g = 0; g < 16; g++) {
+            upmask[g] = 0;
+            if (g >= 8 && g <= 10)
+                continue;
+            for (int p = 0; p < 8; p++) {
+                uint32_t mask = 0xFu << (4 * p);
+                uint32_t save_con = PCON(g);
+                if ((save_con & mask) == (dfu_con[g] & mask))
+                    continue;
+                PCON(g) = (save_con & ~mask) | (dfu_con[g] & mask);
+                udelay(50000);
+                uint8_t d8 = PDAT(8) & 0xff;
+                if (d8 == 0xff) {
+                    upmask[g] |= 1 << p;
+                    if (found_g < 0) { found_g = g; found_p = p; }
+                }
+                PCON(g) = save_con;
+                udelay(20000);
+            }
+        }
+        /* Piezo report, independent of the LCD:
+           found: (g+1) short beeps, pause, (p+1) short beeps.
+           none:  three long beeps. */
+        static uint16_t beep[] = { 1500, 120, 0, 0 };
+        static uint16_t longbeep[] = { 800, 700, 0, 0 };
+        if (found_g >= 0) {
+            for (int i = 0; i <= found_g; i++) { piezo_seq(beep); sleep(HZ/4); }
+            sleep(HZ);
+            for (int i = 0; i <= found_p; i++) { piezo_seq(beep); sleep(HZ/4); }
+        } else {
+            for (int i = 0; i < 3; i++) { piezo_seq(longbeep); sleep(HZ/2); }
+        }
+        /* Bring the LCD back in case a tested pin was its reset line. */
+        lcd_init();
+        lcd_set_foreground(LCD_WHITE);
+        lcd_set_background(LCD_BLACK);
+        lcd_clear_display();
+        lcd_setfont(FONT_SYSFIXED);
+        line = 0;
+        printf("pin bisect (mask of pins that raise dat8):");
+        for (int g = 0; g < 16; g += 4)
+            printf(" g%d-%d: %02x %02x %02x %02x", g, g + 3, upmask[g],
+                   upmask[g+1], upmask[g+2], upmask[g+3]);
+        printf("first hit: group %d pin %d", found_g, found_p);
+        if (found_g >= 0) {
+            uint32_t mask = 0xFu << (4 * found_p);
+            PCON(found_g) = (PCON(found_g) & ~mask) | (dfu_con[found_g] & mask);
+            udelay(50000);
+            printf("applied; dat8 now %02lx", (unsigned long)(PDAT(8) & 0xff));
+        }
+#else
+        (void)dfu_punc;
+        printf("dat8 now %02lx, retry:", (unsigned long)(PDAT(8) & 0xff));
+#endif
+        rc = nand3g_reset(ctrl, 0);
+        rc = nand3g_read_id(ctrl, 0, id);
+        printf("ce0 id %02x %02x %02x %02x %02x %02x rc %d",
+               id[0], id[1], id[2], id[3], id[4], id[5], rc);
+        memset(buf, 0xAA, 32);
+        rc = nand3g_read_page(ctrl, 0, 128, buf, spare, &raw);
+        printf("pg 128: ecc %d raw %08lx sp %08lx", rc, (unsigned long)raw,
+               (unsigned long)spare[0]);
+        printf(" %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+               buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+               buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
+    }
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
+static void nand_probe_ctrl0(void) { nand_probe_ctrl(0); }
+static void nand_probe_ctrl1(void) { nand_probe_ctrl(1); }
+#endif /* IPOD_NANO3G */
+
 static void devel_menu(void)
 {
     const char *items[] = {
+#ifdef IPOD_NANO3G
+        "NAND probe (ctrl 0)",
+        "NAND probe (ctrl 1)",
+#endif
 #ifdef HAVE_LCD_SLEEP
         "LCD sleep/awake test",
 #endif
@@ -698,6 +873,10 @@ static void devel_menu(void)
         "Power off",
     };
     void (*handlers[])(void) = {
+#ifdef IPOD_NANO3G
+        nand_probe_ctrl0,
+        nand_probe_ctrl1,
+#endif
 #ifdef HAVE_LCD_SLEEP
         sleep_test,
 #endif
