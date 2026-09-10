@@ -57,6 +57,8 @@ bool dbg_hw_info(void)
     unsigned int state = 0;
 #ifdef UC87XX_DEBUG
     const unsigned int max_states=3;
+#elif defined(IPOD_NANO3G)
+    const unsigned int max_states=3;
 #else
     const unsigned int max_states=2;
 #endif
@@ -155,6 +157,13 @@ bool dbg_hw_info(void)
             _DEBUG_PRINTF("USB D-: %d mV", adc_read_usbdata_voltage(false));
             line++;
         }
+#ifdef IPOD_NANO3G
+        else if(state==2)
+        {
+            extern int pcm_nano3g_debug(int line);
+            line = pcm_nano3g_debug(line);
+        }
+#endif
 #ifdef UC87XX_DEBUG
         else if(state==(max_states-1))
         {
