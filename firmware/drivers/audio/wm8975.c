@@ -158,6 +158,14 @@ void audiohw_preinit(void)
     wm8975_write(ROUTMIX2, ROUTMIX2_RD2RO| ROUTMIX2_RI2ROVOL(5));
     wm8975_write(MOUTMIX1, 0);
     wm8975_write(MOUTMIX2, 0);
+
+    /* Extra writes the OF makes on this codec (an Apple-marked part with 68
+       registers, a WM8975 superset): R24 = 0x100 then |= 4, R27 |= 0x40,
+       R67 |= 8. Written raw; wm8975_write() only caches WM8975_NUM_REGISTERS. */
+    wmcodec_write(0x18, 0x100);
+    wmcodec_write(0x18, 0x104);
+    wmcodec_write(0x1b, wm8975_regs[0x1b] | 0x40);
+    wmcodec_write(0x43, 0x8);
 }
 
 void audiohw_postinit(void)

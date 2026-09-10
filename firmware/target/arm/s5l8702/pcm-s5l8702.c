@@ -201,7 +201,15 @@ static void sink_dma_init(void)
 
     dmac_ch_init(&dma_play_ch, &dma_play_ch_cfg);
 
+#ifdef IPOD_NANO3G
+    /* From the nano 3G OF: 0x0B000000 | (burst 1 << 20) | 1, i.e. the
+       Classic's value with the bit-clocks-per-frame field = 0 (32fs).
+       The codec (WM8975-compatible) is the I2S master. */
+    I2STXCON = 0x0b100001;
+    I2SRXCON = 0x1000;
+#else
     I2STXCON = 0xb100019;
+#endif
     I2SCLKCON = 1;
 
     audiohw_preinit();
