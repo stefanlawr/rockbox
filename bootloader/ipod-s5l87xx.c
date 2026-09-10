@@ -888,7 +888,13 @@ static void i2s_tx_test(void)
     wm_write(0x25, 0x150);          /* ROUTMIX2: DAC to right out */
     wm_write(0x02, 0x179);          /* LOUT1VOL 0 dB, update */
     wm_write(0x03, 0x179);
-    printf("codec configured");
+    wm_write(0x24, 0x003);          /* OF: ROUTMIX1 */
+    wm_write(0x25, 0x120);          /* OF: ROUTMIX2 */
+    wm_write(0x43, 0x008);          /* OF: R67 |= 8 */
+    wm_write(0x18, 0x100);          /* OF: R24 = 0x100 */
+    wm_write(0x18, 0x104);          /* OF: R24 |= 4 */
+    wm_write(0x1b, 0x040);          /* OF: R27 |= 0x40 */
+    printf("codec configured (OF sequence)");
 
     /* Per the S5L8700 datasheet: I2SSTATUS bit1 = TXDBFUL (tx buffer full),
        bit0 = TXLRIDX (toggles per channel while transmitting). The 8700's
@@ -899,11 +905,9 @@ static void i2s_tx_test(void)
        then stream a square wave with full-flag pacing so a working config is
        audible. */
     struct { uint32_t txcon; int codec_master; const char *name; } cand[] = {
-        { 0x1100301, 0, "iphone 24|20 scl3" },
-        { 0x0100301, 0, "bit20 scl3" },
-        { 0x1100001, 0, "24|20 scl0" },
-        { 0xb100019, 0, "classic, codec slave" },
-        { 0xb100019, 1, "classic, codec master" },
+        { 0x0b100001, 1, "OF: b100001, codec master" },
+        { 0x0b100001, 0, "b100001, codec slave" },
+        { 0x0b100019, 1, "classic, codec master" },
     };
     for (unsigned c = 0; c < ARRAYLEN(cand); c++) {
         /* codec interface mode for this candidate */
@@ -924,6 +928,7 @@ static void i2s_tx_test(void)
             *clkcon = 0;
             udelay(100);
             *txcon = cand[c].txcon;
+            *(volatile uint32_t *)(base + 0x30) = 0x1000;   /* RXCON as the OF */
             *clkdiv = 12000000 / 44100;
             *clkcon = 1;
             *txcom = 0xe;
