@@ -126,7 +126,45 @@ void audiohw_postinit(void)
     wm8975_write(PWRMGMT1, wm8975_regs[PWRMGMT1]);
     audiohw_mute(false);
 }
-#else /* !IPOD_NANO2G */
+#elif defined(IPOD_NANO3G)
+/* nano 3G: the S5L8702 I2S controller is an I2S *slave* (on the Classic
+   the CS42L55 is set to master), fed a 12 MHz MCLK (see pcm-s5l8702.c).
+   So the WM8975 is the master: it generates BCLK (MCLK/8) and LRCLK in
+   "USB mode" (12 MHz) at 44.1 kHz: SR = 10001b, USB = 1, BCM = MCLK/8. */
+void audiohw_preinit(void)
+{
+    wm8975_write(RESET, RESET_RESET);
+
+    wm8975_write(PWRMGMT1, wm8975_regs[PWRMGMT1]);
+    sleep(HZ/50);
+    wm8975_regs[PWRMGMT1] &= ~PWRMGMT1_VMIDSEL_MASK;
+    wm8975_write(PWRMGMT1, wm8975_regs[PWRMGMT1] | PWRMGMT1_VMIDSEL_50K);
+
+    wm8975_write(PWRMGMT2, wm8975_regs[PWRMGMT2]);
+
+    wm8975_write(AINTFCE, AINTFCE_MS | AINTFCE_LRP_I2S_RLO
+                        | AINTFCE_IWL_16BIT | AINTFCE_FORMAT_I2S);
+
+    wm8975_write(DAPCTRL, wm8975_regs[DAPCTRL]);
+
+    wm8975_write(SAMPCTRL, SAMPCTRL_USB | (0x11 << 1) | SAMPCTRL_BCM_MCLK_8);
+
+    wm8975_write(LOUT1VOL, LOUT1VOL_LO1ZC | IPOD_PCM_LEVEL);
+    wm8975_write(ROUT1VOL, ROUT1VOL_RO1VU | ROUT1VOL_RO1ZC | IPOD_PCM_LEVEL);
+
+    wm8975_write(LOUTMIX1, LOUTMIX1_LD2LO| LOUTMIX1_LI2LOVOL(5));
+    wm8975_write(LOUTMIX2, LOUTMIX2_RI2LOVOL(5));
+    wm8975_write(ROUTMIX1, ROUTMIX1_LI2ROVOL(5));
+    wm8975_write(ROUTMIX2, ROUTMIX2_RD2RO| ROUTMIX2_RI2ROVOL(5));
+    wm8975_write(MOUTMIX1, 0);
+    wm8975_write(MOUTMIX2, 0);
+}
+
+void audiohw_postinit(void)
+{
+    audiohw_mute(false);
+}
+#else /* !IPOD_NANO2G && !IPOD_NANO3G */
 void audiohw_preinit(void)
 {
     /* POWER UP SEQUENCE */

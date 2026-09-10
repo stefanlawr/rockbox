@@ -137,13 +137,10 @@
 
 #define CONFIG_LCD LCD_IPOD6GNANO3G4G
 
-// TODO
-#if 0
-/* Define the type of audio codec */
-#define HAVE_WM1870
-#endif
-// XXX: dummy for preliminary build, WRONG CODEC!!!
-#define HAVE_CS42L55
+/* Define the type of audio codec. The chip is Apple-marked "WM1870"
+   (338S0462), a write-only Wolfson at I2C 0x1A whose register map matches
+   the WM8975 (the OF's volume writes hit WM8975 registers 2 and 3). */
+#define HAVE_WM8975
 
 #define HAVE_PCM_DMA_ADDRESS
 

@@ -849,6 +849,170 @@ static void nand_probe_ctrl(int ctrl)
 static void nand_probe_ctrl0(void) { nand_probe_ctrl(0); }
 static void nand_probe_ctrl1(void) { nand_probe_ctrl(1); }
 
+/* I2S transmit test: put the WM8975 into I2S master mode over I2C, route
+   12 MHz to the codec MCLK the way the Classic does, then for each of the
+   three I2S instances enable its clock, configure TX like pcm-s5l8702.c,
+   push samples into the TX FIFO and watch the status register. An instance
+   whose status changes as data is pushed and time passes is being clocked;
+   one that stays constant is not. RAM/registers only. */
+static void wm_write(int reg, int data)
+{
+    unsigned char d = data & 0xff;
+    i2c_write(0, 0x34, (reg << 1) | ((data & 0x100) >> 8), 1, &d);
+}
+
+static void i2s_tx_test(void)
+{
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("I2S TX test (codec = WM8975 master)");
+
+    /* MCLK: OSC0 12 MHz to the codec (CLKCON3 low half = 0, then on) */
+    CLKCON3 = (CLKCON3 & ~0xffff) | 0x8000;
+    udelay(100);
+    CLKCON3 &= ~0x8000;
+    printf("CLKCON3 %08lx CLKCON5 %08lx", (unsigned long)CLKCON3, (unsigned long)CLKCON5);
+    printf("CG16 AUD0 %04x AUD1 %04x AUD2 %04x", CG16_AUD0, CG16_AUD1, CG16_AUD2);
+
+    /* WM8975 as I2S master, 12 MHz USB mode, 44.1 kHz, outputs on */
+    wm_write(0x0F, 0x000);          /* reset */
+    sleep(HZ/50);
+    wm_write(0x19, 0x0C0);          /* PWRMGMT1: VMID 50k, VREF */
+    sleep(HZ/50);
+    wm_write(0x1A, 0x1E0);          /* PWRMGMT2: DACL DACR LOUT1 ROUT1 */
+    wm_write(0x07, 0x042);          /* AINTFCE: master, I2S, 16 bit */
+    wm_write(0x08, 0x123);          /* SAMPCTRL: BCM=MCLK/8, SR=44.1k USB, USB */
+    wm_write(0x05, 0x000);          /* DAPCTRL: unmute */
+    wm_write(0x22, 0x150);          /* LOUTMIX1: DAC to left out */
+    wm_write(0x25, 0x150);          /* ROUTMIX2: DAC to right out */
+    wm_write(0x02, 0x179);          /* LOUT1VOL 0 dB, update */
+    wm_write(0x03, 0x179);
+    printf("codec configured");
+
+    /* Per the S5L8700 datasheet: I2SSTATUS bit1 = TXDBFUL (tx buffer full),
+       bit0 = TXLRIDX (toggles per channel while transmitting). The 8700's
+       I2S Tx is master only; the 8702 adds undocumented TXCON bits 20/24/25/27
+       (Classic uses 0xb100019 with the codec as master, openiboot's iPhone
+       uses 0x1100301 with the codec as slave). Try candidates on I2S0 and
+       I2S1: count words until the buffer reports full, count TXLRIDX toggles,
+       then stream a square wave with full-flag pacing so a working config is
+       audible. */
+    struct { uint32_t txcon; int codec_master; const char *name; } cand[] = {
+        { 0x1100301, 0, "iphone 24|20 scl3" },
+        { 0x0100301, 0, "bit20 scl3" },
+        { 0x1100001, 0, "24|20 scl0" },
+        { 0xb100019, 0, "classic, codec slave" },
+        { 0xb100019, 1, "classic, codec master" },
+    };
+    for (unsigned c = 0; c < ARRAYLEN(cand); c++) {
+        /* codec interface mode for this candidate */
+        wm_write(0x07, cand[c].codec_master ? 0x042 : 0x002);
+        wm_write(0x08, cand[c].codec_master ? 0x123 : 0x023);
+        for (int i = 0; i < 2; i++) {
+            uintptr_t base = I2S_BASE + (i == 1 ? I2S_INTERFACE1_OFFSET : 0);
+            volatile uint32_t *clkcon = (volatile uint32_t *)(base + 0x00);
+            volatile uint32_t *txcon  = (volatile uint32_t *)(base + 0x04);
+            volatile uint32_t *txcom  = (volatile uint32_t *)(base + 0x08);
+            volatile uint32_t *txdb   = (volatile uint32_t *)(base + 0x10);
+            volatile uint32_t *status = (volatile uint32_t *)(base + 0x3C);
+            volatile uint32_t *clkdiv = (volatile uint32_t *)(base + 0x40);
+
+            clockgate_enable(I2SCLKGATE(i), true);
+            if (i == 1) cg16_config(&CG16_AUD1, true, CG16_SEL_OSC, 1, 1);
+            *txcom = 0xa;
+            *clkcon = 0;
+            udelay(100);
+            *txcon = cand[c].txcon;
+            *clkdiv = 12000000 / 44100;
+            *clkcon = 1;
+            *txcom = 0xe;
+
+            int full_at = -1;
+            for (int n = 0; n < 512; n++) {
+                *txdb = (n & 16) ? 0x40004000 : 0xC000C000;
+                if (*status & 2) { full_at = n; break; }
+            }
+            int toggles = 0;
+            uint32_t prev = *status & 1;
+            for (int n = 0; n < 4000; n++) {
+                uint32_t b = *status & 1;
+                if (b != prev) { toggles++; prev = b; }
+            }
+            /* stream ~250 ms of 1.4 kHz square wave, paced by the full flag */
+            long stop = current_tick + HZ/4;
+            uint32_t words = 0, n = 0;
+            while (TIME_BEFORE(current_tick, stop)) {
+                if (*status & 2) continue;
+                *txdb = ((n++ >> 4) & 1) ? 0x40004000 : 0xC000C000;
+                words++;
+            }
+            uint32_t st = *status;
+            *txcom = 0xa;
+            printf("%s i2s%d: full@%d tog %d w %lu st %lx", cand[c].name, i,
+                   full_at, toggles, (unsigned long)words, (unsigned long)st);
+        }
+    }
+    printf("(full@: words until TXDBFUL, -1 never; tog: TXLRIDX toggles/4000;");
+    printf(" w: words streamed in 250 ms)");
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
+/* I2C bus 0 scan: which 7-bit addresses ACK. Then identify the audio
+   codec: a Cirrus CS42L55 (0x4A) has a readable chip ID at register 1;
+   Wolfson parts (0x1A) are write-only, so an ACK there with no readable
+   ID is itself the answer. Read-only apart from the address probes. */
+static void i2c_scan(void)
+{
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("I2C bus 0 scan (7-bit addresses that ACK):");
+    char s[64];
+    int n = 0, found = 0;
+    for (int a = 0x08; a < 0x78; a++) {
+        if (i2c_write(0, a << 1, -1, 0, NULL) == 0) {
+            n += snprintf(s + n, sizeof(s) - n, "%02x ", a);
+            found++;
+            if (n > 40) { printf("%s", s); n = 0; }
+        }
+    }
+    if (n) printf("%s", s);
+    printf("%d device(s)", found);
+
+    unsigned char d[8];
+    if (i2c_write(0, 0x94, -1, 0, NULL) == 0) {
+        int rc = i2c_read(0, 0x94, 0x01, 1, d);
+        printf("0x4A: CS42L55 id reg1 = %02x (rc %d)", d[0], rc);
+        rc = i2c_read(0, 0x94, 0x02, 4, d);
+        printf("0x4A: regs 2..5 = %02x %02x %02x %02x (rc %d)", d[0], d[1], d[2], d[3], rc);
+    } else {
+        printf("0x4A (CS42L55): no ACK");
+    }
+    if (i2c_write(0, 0x34, -1, 0, NULL) == 0) {
+        int rc = i2c_read(0, 0x34, 0x00, 2, d);
+        printf("0x1A: ACK (Wolfson?) read reg0 -> %02x %02x (rc %d)", d[0], d[1], rc);
+    } else {
+        printf("0x1A (Wolfson): no ACK");
+    }
+    printf("PMU 0x73: %s", i2c_write(0, 0xe6, -1, 0, NULL) == 0 ? "ACK" : "no ACK");
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
 extern uint32_t nand3g_stat_reads, nand3g_stat_ecc_flagged,
                 nand3g_stat_ecc_bad, nand3g_stat_errors;
 
@@ -1131,6 +1295,8 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "I2S TX test (3 instances)",
+        "I2C scan / codec identify",
         "Block type map (page 0 of every block)",
         "Hexdump DEVICEINFOBBT page",
         "Hexdump VFL cxt page 152",
@@ -1158,6 +1324,8 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        i2s_tx_test,
+        i2c_scan,
         nand_ftlblock_survey,
         nand_hexdump_devinfo,
         nand_hexdump_ce1_vfl,
