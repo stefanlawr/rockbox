@@ -163,6 +163,11 @@ void nand3g_hw_init(int ctrl)
     nand3g_hw_ready[ctrl] = true;
 }
 
+/* Address cycles programmed into ANUM for a page read. The ROM uses 4 and
+   only ever reads block 0; a 16 Gbit die needs 2 column + 3 row bytes.
+   Exposed so the dev menu can test whether high pages alias. */
+uint32_t nand3g_anum = 4;
+
 /* Diagnostics: STAT and FIFO seen during the last READ STATUS poll. */
 uint32_t nand3g_dbg_stat;
 uint32_t nand3g_dbg_fifo;
@@ -280,7 +285,7 @@ int nand3g_read_page(int c, int ce, uint32_t page,
     if (wait_stat(c, STAT_RBB_DONE))
         return NAND3G_ETIMEOUT_RBB;
 
-    FMC3G_ANUM(c)  = 4;
+    FMC3G_ANUM(c)  = nand3g_anum;
     FMC3G_ADDR0(c) = page << 16;    /* column 0, page low half */
     FMC3G_ADDR1(c) = page >> 16;
     FMC3G_CTRL1(c) = CTRL1_XFER_ADDR;
@@ -376,12 +381,202 @@ int nand3g_read_page(int c, int ce, uint32_t page,
 }
 
 /* ------------------------------------------------------------------------
- * Rockbox storage API. Still stubs: no FTL yet, so there is no logical
- * sector space to expose. Filled in during Phase 2.
+ * nano 2G style NAND API (nand-target.h), consumed by ftl-nano3g.c, which
+ * is the nano 2G Whimory FTL built read-only. Return value convention of
+ * nand_read_page(): bit 0 = transfer error, bit 1 = page is empty (only
+ * when checkempty), bits 4..7 = data ECC status (bit 4 = uncorrectable),
+ * bits 8..11 = spare ECC status. The FTL treats (rc & 0x11F) != 0 as bad.
+ * ---------------------------------------------------------------------- */
+
+#include "kernel.h"
+#include "nand-target.h"
+#include "ftl-target.h"
+#include <string.h>
+
+/* Device table. Only the Intel/Micron parts seen so far; the geometry of
+   0xA5D5D589 is the Intel twin of Micron 0xA5D5D52C in the nano 2G table.
+   Timing fields are unused by this controller (the ROM's fixed values are
+   used instead) and kept for structure compatibility. */
+static const struct nand_device_info_type nand_deviceinfotable[] =
+{
+    {0xA5D5D589, 8192, 7744, 0x80, 7, 3, 2, 2, 1},
+    {0xA5D5D52C, 8192, 7744, 0x80, 7, 3, 2, 2, 1},
+};
+
+static int nand_type[4] = { -1, -1, -1, -1 };
+static long nand_last_activity_value = -1;
+static struct mutex nand_mtx;
+static bool nand_initialized;
+
+/* Statistics for the dev menu / debugging */
+uint32_t nand3g_stat_reads, nand3g_stat_ecc_flagged, nand3g_stat_ecc_bad,
+         nand3g_stat_errors;
+
+/* The FTL's banks are the chip-enables on controller 0 */
+#define NAND3G_CTRL 0
+
+static uint32_t nand_check_empty(const uint8_t* spare)
+{
+    uint32_t i, count = 0;
+    for (i = 0; i < 0x40; i++) if (spare[i] != 0xFF) count++;
+    return (count < 2) ? 1 : 0;
+}
+
+uint32_t nand_read_page(uint32_t bank, uint32_t page, void* databuffer,
+                        void* sparebuffer, uint32_t doecc,
+                        uint32_t checkempty)
+{
+    (void)doecc;    /* the controller always runs its ECC engine */
+    uint32_t spare3[NAND3G_SPARE_WORDS];
+    uint32_t raw, rc = 0;
+    uint8_t *buf = nand3g_page_buffer();
+
+    if (bank >= 4 || nand_type[bank] < 0)
+        return 1;
+
+    mutex_lock(&nand_mtx);
+    nand_last_activity_value = current_tick;
+    nand3g_stat_reads++;
+
+    int r = nand3g_read_page(NAND3G_CTRL, bank, page, buf, spare3, &raw);
+    if (r < 0) {
+        nand3g_stat_errors++;
+        mutex_unlock(&nand_mtx);
+        return 1;
+    }
+    if (r != NAND3G_ECC_OK) {
+        nand3g_stat_ecc_flagged++;
+        if (r != NAND3G_ECC_CORRECTED) {
+            nand3g_stat_ecc_bad++;
+            rc |= 0x10;
+        }
+    }
+
+    if (databuffer)
+        memcpy(databuffer, buf, NAND3G_PAGE_SIZE);
+
+    /* Build the 64-byte spare the FTL expects: the three metadata words
+       from the controller are bytes 0..11 (lpn/usn, usn/idx, field_8,
+       type, eccmark, field_B); the rest is ECC parity the controller
+       already consumed, reported as 0xFF. An erased page reads 0xFF too. */
+    uint8_t spare[0x40];
+    memset(spare, 0xFF, sizeof(spare));
+    memcpy(spare, spare3, 12);
+    if (sparebuffer)
+        memcpy(sparebuffer, spare, 0x40);
+    if (checkempty)
+        rc |= nand_check_empty(spare) << 1;
+
+    mutex_unlock(&nand_mtx);
+    return rc;
+}
+
+uint32_t nand_read_page_fast(uint32_t page, void* databuffer,
+                             void* sparebuffer, uint32_t doecc,
+                             uint32_t checkempty)
+{
+    uint32_t i, rc = 0;
+    for (i = 0; i < 4; i++)
+    {
+        if (nand_type[i] < 0) continue;
+        void* databuf = databuffer ? (void*)((uintptr_t)databuffer + 0x800 * i) : NULL;
+        void* sparebuf = sparebuffer ? (void*)((uintptr_t)sparebuffer + 0x40 * i) : NULL;
+        uint32_t ret = nand_read_page(i, page, databuf, sparebuf, doecc, checkempty);
+        if (ret & 1) rc |= 1 << (i << 2);
+        if (ret & 2) rc |= 2 << (i << 2);
+        if (ret & 0x10) rc |= 4 << (i << 2);
+        if (ret & 0x100) rc |= 8 << (i << 2);
+    }
+    return rc;
+}
+
+/* Read-only driver: every write/erase entry point fails loudly. */
+uint32_t nand_write_page(uint32_t bank, uint32_t page, void* databuffer,
+                         void* sparebuffer, uint32_t doecc)
+{
+    (void)bank; (void)page; (void)databuffer; (void)sparebuffer; (void)doecc;
+    return 1;
+}
+
+uint32_t nand_write_page_start(uint32_t bank, uint32_t page, void* databuffer,
+                               void* sparebuffer, uint32_t doecc)
+{
+    (void)bank; (void)page; (void)databuffer; (void)sparebuffer; (void)doecc;
+    return 1;
+}
+
+uint32_t nand_write_page_collect(uint32_t bank)
+{
+    (void)bank;
+    return 1;
+}
+
+uint32_t nand_block_erase(uint32_t bank, uint32_t page)
+{
+    (void)bank; (void)page;
+    return 1;
+}
+
+uint32_t nand_reset(uint32_t bank)
+{
+    if (bank >= 4) return 1;
+    return nand3g_reset(NAND3G_CTRL, bank) ? 1 : 0;
+}
+
+const struct nand_device_info_type* nand_get_device_type(uint32_t bank)
+{
+    if (bank >= 4 || nand_type[bank] < 0)
+        return NULL;
+    return &nand_deviceinfotable[nand_type[bank]];
+}
+
+void nand_set_active(void)
+{
+    nand_last_activity_value = current_tick;
+}
+
+long nand_last_activity(void)
+{
+    return nand_last_activity_value;
+}
+
+void nand_power_up(void)
+{
+    /* The NAND supply is PMU reg 0x10 bit 2, left on by pmu_preinit(). */
+}
+
+void nand_power_down(void)
+{
+}
+
+int nand_device_init(void)
+{
+    if (nand_initialized) return 0;
+    mutex_init(&nand_mtx);
+    nand3g_hw_init(NAND3G_CTRL);
+
+    for (uint32_t ce = 0; ce < 4; ce++)
+    {
+        uint8_t id[8];
+        nand_type[ce] = -1;
+        if (nand3g_reset(NAND3G_CTRL, ce)) continue;
+        if (nand3g_read_id(NAND3G_CTRL, ce, id)) continue;
+        uint32_t packed = id[0] | (id[1] << 8) | (id[2] << 16) | ((uint32_t)id[3] << 24);
+        for (unsigned j = 0; j < ARRAYLEN(nand_deviceinfotable); j++)
+            if (nand_deviceinfotable[j].id == packed) { nand_type[ce] = j; break; }
+    }
+    nand_last_activity_value = current_tick;
+    nand_initialized = true;
+    return (nand_type[0] < 0) ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------------
+ * Rockbox storage API, mirroring firmware/target/arm/s5l8700/ata-nand-s5l8700.c
  * ---------------------------------------------------------------------- */
 
 int nand_init(void)
 {
+    if (ftl_init()) return 1;
     return 0;
 }
 
@@ -390,14 +585,25 @@ void nand_spindown(int seconds)
     (void)seconds;
 }
 
+void nand_sleepnow(void)
+{
+    nand_power_down();
+}
+
 void nand_spin(void)
 {
+    nand_set_active();
+}
+
+void nand_enable(bool on)
+{
+    (void)on;
 }
 
 #ifdef HAVE_STORAGE_FLUSH
 int nand_flush(void)
 {
-    return 0;
+    return ftl_sync();
 }
 #endif
 
@@ -407,10 +613,7 @@ int nand_read_sectors(IF_MD(int drive,) sector_t start, int incount,
 #ifdef HAVE_MULTIDRIVE
     (void) drive;
 #endif
-    (void) start;
-    (void) incount;
-    (void) inbuf;
-    return -1;
+    return ftl_read(start, incount, inbuf);
 }
 
 int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
@@ -437,15 +640,26 @@ int nand_event(long id, intptr_t data)
 void nand_get_info(IF_MD(int drive,) struct storage_info *info)
 {
     IF_MD((void)drive);
+    /* ftl_nand_type is the FTL's virtual geometry: 8-way interleaved
+       superblocks of pagesperblock * 8 pages (see ftl-nano3g.c). */
+    uint32_t ppb = 8 * ftl_nand_type->pagesperblock;
     info->sector_size = SECTOR_SIZE;
-    info->num_sectors = 0;
-    info->vendor = "";
-    info->product = "";
-    info->revision = "";
+    info->num_sectors = ftl_nand_type->userblocks * ppb;
+    info->vendor = "Apple";
+    info->product = "iPod nano 3G";
+    info->revision = "1.0";
 }
 #endif
 
 long nand_last_disk_activity(void)
 {
-    return 0;
+    return nand_last_activity();
 }
+
+#ifdef CONFIG_STORAGE_MULTI
+int nand_num_drives(int first_drive)
+{
+    (void)first_drive;
+    return 1;
+}
+#endif

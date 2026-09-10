@@ -60,6 +60,8 @@
 #endif
 #ifdef IPOD_NANO3G
 #include "nand-nano3g.h"
+#include "nand-target.h"
+#include "ftl-target.h"
 #endif
 
 
@@ -846,12 +848,294 @@ static void nand_probe_ctrl(int ctrl)
 
 static void nand_probe_ctrl0(void) { nand_probe_ctrl(0); }
 static void nand_probe_ctrl1(void) { nand_probe_ctrl(1); }
+
+extern uint32_t nand3g_stat_reads, nand3g_stat_ecc_flagged,
+                nand3g_stat_ecc_bad, nand3g_stat_errors;
+
+/* Hex viewer for one NAND page: 4 screens of 512 bytes, 24 bytes per
+   line, SELECT advances. Used to capture the DEVICEINFOBBT page layout. */
+static void nand_hexdump_page(int ce, uint32_t page)
+{
+    uint8_t *buf = nand3g_page_buffer();
+    uint32_t spare[NAND3G_SPARE_WORDS], raw;
+    nand3g_hw_init(0);
+    nand3g_reset(0, ce);
+    int rc = nand3g_read_page(0, ce, page, buf, spare, &raw);
+    for (int screen = 0; screen < 4; screen++) {
+        lcd_clear_display();
+        lcd_set_foreground(LCD_WHITE);
+        line = 0;
+        printf("ce%d pg %lu ecc %d sp %08lx %08lx %08lx  %d/4", ce,
+               (unsigned long)page, rc, (unsigned long)spare[0],
+               (unsigned long)spare[1], (unsigned long)spare[2], screen + 1);
+        for (int l = 0; l < 22; l++) {
+            int off = screen * 512 + l * 24;
+            if (off >= 2048) break;
+            char s[64];
+            int n = 0;
+            for (int i = 0; i < 24 && off + i < 2048; i++)
+                n += snprintf(s + n, sizeof(s) - n, "%02x", buf[off + i]);
+            printf("%s", s);
+        }
+        lcd_set_foreground(LCD_RBYELLOW);
+        printf("SELECT: next");
+        while (button_status() != BUTTON_NONE)
+            sleep(HZ/100);
+        while (button_status() != BUTTON_SELECT)
+            sleep(HZ/100);
+    }
+}
+
+static void nand_hexdump_devinfo(void)
+{
+    /* block 8191, page 127 on CE0: the newest DEVICEINFOBBT copy */
+    nand_hexdump_page(0, 8191 * 128 + 127);
+}
+
+static void nand_hexdump_ce1_vfl(void)
+{
+    /* CE0 page 152: newest VFL context copy in block 1 (all 2048 bytes) */
+    nand_hexdump_page(0, 152);
+}
+
+/* Survey of the FTL control blocks (0x3EF, 0x520, 0x660 on this unit):
+   spare words and first bytes of a few pages on both dies, to learn the
+   nano 3G's page type numbering (nano 2G: 0x43 cxt, 0x44 map, 0x46 erase
+   counters, 0x47 dirty marker). */
+static void nand_ftlblock_survey(void)
+{
+    uint8_t *buf = nand3g_page_buffer();
+    uint32_t spare[NAND3G_SPARE_WORDS], raw;
+
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("Block map: page 0 spare type of every block, both dies");
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+    nand3g_reset(0, 1);
+    /* tally per type: 0x40, 0x41, 0x43, 0x44, 0x45, 0x46, 0x47, 0x80,
+       other, erased, read error */
+    uint32_t tally[11] = {0};
+    char list[6][64];
+    int nlist = 0, listlen = 0;
+    memset(list, 0, sizeof(list));
+    for (int ce = 0; ce < 2; ce++)
+        for (uint32_t blk = 0; blk < 8192; blk++) {
+            int rc = nand3g_read_page(0, ce, blk * 128, buf, spare, &raw);
+            uint8_t type = (spare[2] >> 8) & 0xFF;
+            if (rc < 0) { tally[10]++; continue; }
+            if (spare[0] == 0xFFFFFFFF && spare[2] == 0xFFFFFFFF) { tally[9]++; continue; }
+            switch (type) {
+                case 0x40: tally[0]++; break;
+                case 0x41: tally[1]++; break;
+                case 0x43: tally[2]++; break;
+                case 0x44: tally[3]++; break;
+                case 0x45: tally[4]++; break;
+                case 0x46: tally[5]++; break;
+                case 0x47: tally[6]++; break;
+                case 0x80: tally[7]++; break;
+                default:   tally[8]++; break;
+            }
+            /* record control-type blocks (not 0x40/0x41/0x80) */
+            if (type != 0x40 && type != 0x41 && type != 0x80 && nlist < 6) {
+                int n = snprintf(list[nlist] + listlen, 64 - listlen, "%d/%lx:%02x ",
+                                 ce, (unsigned long)blk, type);
+                listlen += n;
+                if (listlen > 44) { nlist++; listlen = 0; }
+            }
+        }
+    printf("40:%lu 41:%lu 43:%lu 44:%lu 45:%lu 46:%lu", (unsigned long)tally[0],
+           (unsigned long)tally[1], (unsigned long)tally[2], (unsigned long)tally[3],
+           (unsigned long)tally[4], (unsigned long)tally[5]);
+    printf("47:%lu 80:%lu other:%lu erased:%lu err:%lu", (unsigned long)tally[6],
+           (unsigned long)tally[7], (unsigned long)tally[8], (unsigned long)tally[9],
+           (unsigned long)tally[10]);
+    printf("control-type blocks (ce/blk:type):");
+    for (int i = 0; i < 6; i++)
+        if (list[i][0]) printf("%s", list[i]);
+
+    /* Bank order probe: vblock 0x330 maps to physical 0x660/0x661 and
+       0x1660/0x1661 on each die. The logical page number (spare word 0)
+       of page 0 in each tells the interleave order. */
+    printf("lpn of page 0/1 in sibling blocks (ce/blk: lpn0 lpn1):");
+    const uint32_t sib[] = { 0x660, 0x661, 0x1660, 0x1661 };
+    for (int ce = 0; ce < 2; ce++) {
+        char s[64]; int n = 0;
+        for (unsigned i = 0; i < ARRAYLEN(sib); i++) {
+            uint32_t l0, l1;
+            nand3g_read_page(0, ce, sib[i] * 128, buf, spare, &raw); l0 = spare[0];
+            nand3g_read_page(0, ce, sib[i] * 128 + 1, buf, spare, &raw); l1 = spare[0];
+            n += snprintf(s + n, sizeof(s) - n, "%lx:%lx/%lx ", (unsigned long)sib[i],
+                          (unsigned long)l0, (unsigned long)l1);
+        }
+        printf("ce%d %s", ce, s);
+    }
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
+/* Address-cycle / aliasing test and DEVICEINFOSIGN scan, read-only.
+   Reads page 128 and page 128+65536 with 4 and 5 address cycles: if the
+   two pages are identical with 4 cycles, high pages alias. Then scans for
+   the device-info signature with 5 cycles. */
+static void nand_addr_test(void)
+{
+    uint8_t *buf = nand3g_page_buffer();
+    uint32_t spare[NAND3G_SPARE_WORDS], raw;
+    int rc;
+
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("Address cycle test");
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+
+    const uint32_t pages[] = { 128, 128 + 65536, 128 + 2 * 65536 };
+    for (uint32_t anum = 4; anum <= 5; anum++) {
+        nand3g_anum = anum;
+        for (unsigned i = 0; i < ARRAYLEN(pages); i++) {
+            memset(buf, 0xAA, 16);
+            rc = nand3g_read_page(0, 0, pages[i], buf, spare, &raw);
+            printf("a%lu pg %lu: ecc %d sp %08lx %02x%02x%02x%02x %02x%02x%02x%02x",
+                   (unsigned long)anum, (unsigned long)pages[i], rc,
+                   (unsigned long)spare[0], buf[0], buf[1], buf[2], buf[3],
+                   buf[4], buf[5], buf[6], buf[7]);
+        }
+    }
+
+    /* Signature scan: any page starting with "DEVICEINFO" (nano 2G uses
+       "DEVICEINFOSIGN", the iPhone-era Whimory uses "DEVICEINFOBBT"),
+       every page of the last 10% of blocks, chip-enables 0 and 1. Stops
+       after the first few hits per CE. Also counts erased pages so we
+       learn how the tail of the flash is used. */
+    uint32_t found = 0, hits = 0, scanned = 0;
+    for (int ce = 0; ce < 2; ce++) {
+        uint32_t cehits = 0, erased = 0;
+        for (uint32_t blk = 8191; blk >= 8192 - 819 && cehits < 2; blk--) {
+            for (uint32_t p = 0; p < 128; p++) {
+                uint32_t page = blk * 128 + p;
+                scanned++;
+                rc = nand3g_read_page(0, ce, page, buf, spare, &raw);
+                if (rc < 0) continue;
+                if (spare[0] == 0xFFFFFFFF && buf[0] == 0xFF && buf[1] == 0xFF) {
+                    erased++;
+                    continue;
+                }
+                if (memcmp(buf, "DEVICEINFO", 10) == 0) {
+                    printf("ce%d blk %lu pg %lu: %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c",
+                           ce, (unsigned long)blk, (unsigned long)p,
+                           buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                           buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
+                    printf("  sp %08lx %08lx %08lx", (unsigned long)spare[0],
+                           (unsigned long)spare[1], (unsigned long)spare[2]);
+                    if (!found) found = page;
+                    hits++; cehits++;
+                }
+            }
+        }
+        printf("ce%d: %lu hits, %lu erased pages in scan", ce,
+               (unsigned long)cehits, (unsigned long)erased);
+    }
+    printf("scanned %lu pages, %lu hits, first %lu", (unsigned long)scanned,
+           (unsigned long)hits, (unsigned long)found);
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
+/* Read-only FTL mount test: nand_init() runs ftl_init() (device info scan,
+   VFL and FTL context load), then sector 0 (MBR) and the first sector of
+   partition 1 are read through ftl_read(). Nothing is written. */
+static void ftl_mount_test(void)
+{
+    static uint8_t sec[SECTOR_SIZE] STORAGE_ALIGN_ATTR;
+
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("FTL mount test (read-only)");
+
+    extern uint32_t ftl_dbg[12];
+    long t0 = current_tick;
+    int rc = nand_init();
+    long dt = current_tick - t0;
+    printf("nand_init/ftl_init: %d  (%ld ms)", rc, dt * (1000 / HZ));
+    printf("dbg step %lu: %lx %lx %lx %lx %lx", (unsigned long)ftl_dbg[0],
+           (unsigned long)ftl_dbg[1], (unsigned long)ftl_dbg[2],
+           (unsigned long)ftl_dbg[3], (unsigned long)ftl_dbg[4],
+           (unsigned long)ftl_dbg[5]);
+    printf(" %lx %lx %lx %lx %lx %lx", (unsigned long)ftl_dbg[6],
+           (unsigned long)ftl_dbg[7], (unsigned long)ftl_dbg[8],
+           (unsigned long)ftl_dbg[9], (unsigned long)ftl_dbg[10],
+           (unsigned long)ftl_dbg[11]);
+    printf("reads %lu eccflag %lu eccbad %lu err %lu",
+           (unsigned long)nand3g_stat_reads, (unsigned long)nand3g_stat_ecc_flagged,
+           (unsigned long)nand3g_stat_ecc_bad, (unsigned long)nand3g_stat_errors);
+    if (rc == 0) {
+        printf("banks %lu blocks %u user %u ppb %u",
+               (unsigned long)ftl_banks, ftl_nand_type->blocks,
+               ftl_nand_type->userblocks, ftl_nand_type->pagesperblock);
+        rc = ftl_read(0, 1, sec);
+        printf("sector 0: rc %d sig %02x%02x", rc, sec[510], sec[511]);
+        printf(" %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+               sec[0], sec[1], sec[2], sec[3], sec[4], sec[5], sec[6], sec[7],
+               sec[8], sec[9], sec[10], sec[11], sec[12], sec[13], sec[14], sec[15]);
+        /* partition table entries at 0x1BE: type at +4, LBA start at +8 */
+        for (int p = 0; p < 2; p++) {
+            const uint8_t *e = &sec[0x1BE + 16 * p];
+            uint32_t lba = e[8] | (e[9] << 8) | (e[10] << 16) | ((uint32_t)e[11] << 24);
+            uint32_t len = e[12] | (e[13] << 8) | (e[14] << 16) | ((uint32_t)e[15] << 24);
+            printf("part%d type %02x lba %lu len %lu", p, e[4],
+                   (unsigned long)lba, (unsigned long)len);
+            if ((e[4] == 0x0B || e[4] == 0x0C) && lba != 0) {
+                /* The table's unit is not known yet (2048 or 4096 bytes):
+                   try the LBA as a 2048-byte FTL sector and doubled. */
+                for (int mult = 1; mult <= 2; mult++) {
+                    rc = ftl_read(lba * mult, 1, sec);
+                    printf(" x%d: rc %d %02x%02x%02x oem %c%c%c%c%c%c%c%c fs %c%c%c%c%c",
+                           mult, rc, sec[0], sec[1], sec[2], sec[3], sec[4], sec[5],
+                           sec[6], sec[7], sec[8], sec[9], sec[10],
+                           sec[82], sec[83], sec[84], sec[85], sec[86]);
+                    printf("   bps %u spc %u sig %02x%02x",
+                           sec[11] | (sec[12] << 8), sec[13], sec[510], sec[511]);
+                }
+            }
+        }
+    }
+    printf("reads %lu eccflag %lu eccbad %lu err %lu",
+           (unsigned long)nand3g_stat_reads, (unsigned long)nand3g_stat_ecc_flagged,
+           (unsigned long)nand3g_stat_ecc_bad, (unsigned long)nand3g_stat_errors);
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
 #endif /* IPOD_NANO3G */
 
 static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "Block type map (page 0 of every block)",
+        "Hexdump DEVICEINFOBBT page",
+        "Hexdump VFL cxt page 152",
+        "NAND address cycle test",
+        "FTL mount test (read-only)",
         "NAND probe (ctrl 0)",
         "NAND probe (ctrl 1)",
 #endif
@@ -874,6 +1158,11 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        nand_ftlblock_survey,
+        nand_hexdump_devinfo,
+        nand_hexdump_ce1_vfl,
+        nand_addr_test,
+        ftl_mount_test,
         nand_probe_ctrl0,
         nand_probe_ctrl1,
 #endif

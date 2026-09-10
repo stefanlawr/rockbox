@@ -70,6 +70,9 @@ int nand3g_read_page(int ctrl, int ce, uint32_t page,
                      void *data, uint32_t spare[NAND3G_SPARE_WORDS],
                      uint32_t *raw_stat);
 
+/* Address cycle count used for page reads (default 4, see nand-nano3g.c). */
+extern uint32_t nand3g_anum;
+
 /* Diagnostics from the last READ STATUS poll (see nand-nano3g.c). */
 extern uint32_t nand3g_dbg_stat;
 extern uint32_t nand3g_dbg_fifo;
