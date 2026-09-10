@@ -970,6 +970,129 @@ static void i2s_tx_test(void)
         sleep(HZ/100);
 }
 
+/* DMA playback test: same DMA channel setup as pcm-s5l8702.c, feeding a
+   square wave to I2S0 with the OF's I2S/codec configuration. Reports how
+   many DMA completion callbacks arrive in one second (expect ~20 for
+   8 KiB chunks at 44.1 kHz stereo 16-bit) and the I2S status. */
+#include "dma-s5l8702.h"
+static struct dmac_tsk dma_test_tskbuf[4];
+static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
+static volatile uint32_t dma_test_cbs;
+static int16_t dma_test_tone[4096] STORAGE_ALIGN_ATTR;  /* 8 KiB */
+static void dma_test_callback(void *data);
+static struct dmac_ch dma_test_ch = {
+    .dmac = &s5l8702_dmac0,
+    .prio = DMAC_CH_PRIO(2),
+    .cb_fn = dma_test_callback,
+    .tskbuf = dma_test_tskbuf,
+    .tskbuf_mask = 3,
+    .queue_mode = QUEUE_LINK,
+    .llibuf = dma_test_llibuf,
+    .llibuf_mask = 3,
+    .llibuf_bus = DMAC_MASTER_AHB1,
+};
+static struct dmac_ch_cfg dma_test_ch_cfg = {
+    .srcperi = S5L8702_DMAC0_PERI_MEM,
+    .dstperi = S5L8702_DMAC0_PERI_IIS0_TX,
+    .sbsize  = DMACCxCONTROL_BSIZE_8,
+    .dbsize  = DMACCxCONTROL_BSIZE_4,
+    .swidth  = DMACCxCONTROL_WIDTH_16,
+    .dwidth  = DMACCxCONTROL_WIDTH_16,
+    .sbus    = DMAC_MASTER_AHB1,
+    .dbus    = DMAC_MASTER_AHB1,
+    .sinc    = DMACCxCONTROL_INC_ENABLE,
+    .dinc    = DMACCxCONTROL_INC_DISABLE,
+    .prot    = DMAC_PROT_CACH | DMAC_PROT_BUFF | DMAC_PROT_PRIV,
+    .lli_xfer_max_count = DMAC_LLI_MAX_COUNT & ~1,
+};
+static volatile int dma_test_running;
+static void dma_test_callback(void *data)
+{
+    (void)data;
+    dma_test_cbs++;
+    if (dma_test_running)
+        dmac_ch_queue(&dma_test_ch, dma_test_tone,
+                      (void*)S5L8702_DADDR_PERI_IIS0_TX, sizeof(dma_test_tone), NULL);
+}
+
+static void dma_play_test(void)
+{
+    lcd_clear_display();
+    lcd_set_foreground(LCD_WHITE);
+    line = 0;
+    printf("DMA playback test (I2S0, OF config)");
+
+    /* 1.4 kHz square wave, stereo 16-bit */
+    for (int i = 0; i < 4096; i++)
+        dma_test_tone[i] = ((i / 2) & 16) ? 0x3000 : -0x3000;
+    commit_dcache_range(dma_test_tone, sizeof(dma_test_tone));
+
+    /* MCLK + codec exactly as the OF */
+    CLKCON3 = (CLKCON3 & ~0xffff) | 0x8000;
+    udelay(100);
+    CLKCON3 &= ~0x8000;
+    wm_write(0x0F, 0x000);
+    sleep(HZ/50);
+    wm_write(0x19, 0x0C0);
+    sleep(HZ/50);
+    wm_write(0x07, 0x042);
+    wm_write(0x1A, 0x1E0);
+    wm_write(0x22, 0x150);
+    wm_write(0x25, 0x120);
+    wm_write(0x24, 0x003);
+    wm_write(0x43, 0x008);
+    wm_write(0x18, 0x100);
+    wm_write(0x18, 0x104);
+    wm_write(0x1b, 0x040);
+    wm_write(0x08, 0x123);
+    wm_write(0x05, 0x000);
+    wm_write(0x02, 0x179);
+    wm_write(0x03, 0x179);
+
+    /* I2S0 as pcm-s5l8702.c sink_dma_init does */
+    PWRCON(1) &= ~(1 << 7);
+    dmac_ch_init(&dma_test_ch, &dma_test_ch_cfg);
+    I2STXCON = 0x0b100001;
+    I2SRXCON = 0x1000;
+    I2SCLKCON = 1;
+    I2SCLKDIV = 12000000 / 44100;
+    printf("DMAC0 cfg: INTSTATUS %08lx  I2S st %08lx",
+           (unsigned long)*(volatile uint32_t*)0x38200000, (unsigned long)I2SSTATUS);
+
+    dma_test_cbs = 0;
+    dma_test_running = 1;
+    I2STXCOM = 0xe;
+    dmac_ch_queue(&dma_test_ch, dma_test_tone, (void*)S5L8702_DADDR_PERI_IIS0_TX,
+                  sizeof(dma_test_tone), NULL);
+    dmac_ch_queue(&dma_test_ch, dma_test_tone, (void*)S5L8702_DADDR_PERI_IIS0_TX,
+                  sizeof(dma_test_tone), NULL);
+    uint32_t s0 = I2SSTATUS;
+    sleep(HZ/2);
+    uint32_t c1 = dma_test_cbs, s1 = I2SSTATUS;
+    sleep(HZ/2);
+    uint32_t c2 = dma_test_cbs, s2 = I2SSTATUS;
+    dma_test_running = 0;
+    sleep(HZ/10);
+    dmac_ch_stop(&dma_test_ch);
+    I2STXCOM = 0xa;
+    printf("callbacks after 0.5 s: %lu, after 1 s: %lu", (unsigned long)c1, (unsigned long)c2);
+    printf("I2S status: start %lx, 0.5 s %lx, 1 s %lx", (unsigned long)s0,
+           (unsigned long)s1, (unsigned long)s2);
+    printf("DMAC0 INTSTATUS %08lx RAWINTTC %08lx ENBLD %08lx",
+           (unsigned long)*(volatile uint32_t*)0x38200000,
+           (unsigned long)*(volatile uint32_t*)0x38200014,
+           (unsigned long)*(volatile uint32_t*)0x3820001c);
+    printf("(expect ~20 callbacks/s and an audible tone)");
+
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE)
+        sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT)
+        sleep(HZ/100);
+}
+
 /* I2C bus 0 scan: which 7-bit addresses ACK. Then identify the audio
    codec: a Cirrus CS42L55 (0x4A) has a readable chip ID at register 1;
    Wolfson parts (0x1A) are write-only, so an ACK there with no readable
@@ -1300,6 +1423,7 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "DMA playback test (tone via DMA)",
         "I2S TX test (3 instances)",
         "I2C scan / codec identify",
         "Block type map (page 0 of every block)",
@@ -1329,6 +1453,7 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        dma_play_test,
         i2s_tx_test,
         i2c_scan,
         nand_ftlblock_survey,

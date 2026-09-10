@@ -106,8 +106,16 @@ static inline void play_queue_dma(void *addr, size_t size, void *cb_data)
                 (void*)S5L8702_DADDR_PERI_IIS0_TX, size, cb_data);
 }
 
+#ifdef IPOD_NANO3G
+unsigned int pcm_dbg_cbs, pcm_dbg_cbs_null, pcm_dbg_starts, pcm_dbg_stops;
+#endif
+
 static void dma_play_callback(void *cb_data)
 {
+#ifdef IPOD_NANO3G
+    pcm_dbg_cbs++;
+    if (!cb_data) pcm_dbg_cbs_null++;
+#endif
     if (!cb_data)
         return; /* dblbuf callback entered, nothing to do */
 
@@ -143,6 +151,9 @@ static void dma_play_callback(void *cb_data)
 
 static void sink_dma_stop(void)
 {
+#ifdef IPOD_NANO3G
+    pcm_dbg_stops++;
+#endif
     dmac_ch_stop(&dma_play_ch);
     I2STXCOM = 0xa;
 }
@@ -153,8 +164,53 @@ static void sink_dma_start(const void* addr, size_t size)
 
     pcm_remaining = size;
     I2STXCOM = 0xe;
+#ifdef IPOD_NANO3G
+    pcm_dbg_starts++;
+#endif
     dma_play_callback((void*)addr);
 }
+
+#ifdef IPOD_NANO3G
+#include "lcd.h"
+/* Debug page for "View HW info": playback DMA channel state. */
+int pcm_nano3g_debug(int line)
+{
+    uint32_t b = dma_play_ch.baddr, d = dma_play_ch.dmac->baddr;
+    lcd_putsf(0, line++, "PCM/DMA (nano3g)");
+    lcd_putsf(0, line++, "starts %u stops %u lock %d", pcm_dbg_starts, pcm_dbg_stops, locked);
+    lcd_putsf(0, line++, "cbs %u (null %u) playing %d", pcm_dbg_cbs, pcm_dbg_cbs_null, pcm_is_playing());
+    lcd_putsf(0, line++, "tsk q %lu d %lu rem %lu", (unsigned long)dma_play_ch.tasks_queued,
+              (unsigned long)dma_play_ch.tasks_done, (unsigned long)pcm_remaining);
+    lcd_putsf(0, line++, "DMAC cfg %lx int %lx raw %lx", (unsigned long)DMACCONFIG(d),
+              (unsigned long)DMACINTSTS(d), (unsigned long)DMACRAWINTTCSTS(d));
+    lcd_putsf(0, line++, "ch cfg %08lx ctl %08lx", (unsigned long)DMACCxCONFIG(b),
+              (unsigned long)DMACCxCONTROL(b));
+    lcd_putsf(0, line++, "src %08lx lnk %08lx", (unsigned long)DMACCxSRCADDR(b),
+              (unsigned long)DMACCxLINK(b));
+    lcd_putsf(0, line++, "I2S st %lx com %lx con %08lx", (unsigned long)I2SSTATUS,
+              (unsigned long)I2STXCOM, (unsigned long)I2STXCON);
+    lcd_putsf(0, line++, "CLKCON3 %08lx PWRCON1 %08lx", (unsigned long)CLKCON3,
+              (unsigned long)PWRCON(1));
+    lcd_putsf(0, line++, "VIC0 en %08lx raw %08lx", (unsigned long)VIC0INTENABLE,
+              (unsigned long)VIC0RAWINTR);
+    {
+        extern unsigned int playback_status(void);
+        extern bool audio_pcmbuf_may_play(void);
+        extern int mixer_channel_status(int channel);
+        extern bool pcm_is_initialized(void);
+        extern bool headphones_inserted(void);
+        extern int button_status(void);
+        extern bool button_hold(void);
+        lcd_putsf(0, line++, "play_st %x mayplay %d mixch %d pcminit %d",
+                  playback_status(), audio_pcmbuf_may_play(),
+                  mixer_channel_status(0), pcm_is_initialized());
+        lcd_putsf(0, line++, "hp %d btn %x hold %d PDAT10 %02lx",
+                  headphones_inserted(), button_status(), button_hold(),
+                  (unsigned long)PDAT10);
+    }
+    return line;
+}
+#endif
 
 /* MCLK = 12MHz (MCLKDIV2=1), [CS42L55 DS, s4.8] */
 #define MCLK_FREQ     12000000
@@ -162,7 +218,13 @@ static void sink_dma_start(const void* addr, size_t size)
 /* set the configured PCM frequency */
 static void sink_set_freq(uint16_t freq)
 {
+#ifdef IPOD_NANO3G
+    /* On the nano 3G the boot chain leaves CLKCON3L (codec MCLK) gated, so
+       force the first write; 0 == OSC0 would otherwise be skipped. */
+    static uint16_t last_clkcon3l = 0xffff;
+#else
     static uint16_t last_clkcon3l = 0;
+#endif
     uint16_t clkcon3l;
 
     /* For unknown reasons, s5l8702 I2S controller does not synchronize
