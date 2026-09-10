@@ -165,6 +165,16 @@ bool dbg_hw_info(void)
                     pmu_read_adc_raw(4,0), pmu_read_adc_raw(5,0),
                     pmu_read_adc_raw(6,0), pmu_read_adc_raw(7,0),
                     pmu_read_adc_raw(0x13,1));
+                {
+                    extern void rtc_nano3g_debug(int*, long*, long*, long*, long*);
+                    int ld; long od, os, cd, cs;
+                    unsigned char rr[6];
+                    rtc_nano3g_debug(&ld, &od, &os, &cd, &cs);
+                    pmu_read_multiple(0x40, 6, rr);
+                    _DEBUG_PRINTF("RTC regs %02x %02x %02x %02x %02x %02x cnt %ldd %lds",
+                        rr[0], rr[1], rr[2], rr[3], rr[4], rr[5], cd, cs);
+                    _DEBUG_PRINTF("prefs offset loaded %d: %ldd %lds", ld, od, os);
+                }
                 _DEBUG_PRINTF("PMU r04 %02x r10 %02x r21 %02x r30 %02x r4b %02x r4c %02x r4d %02x",
                     pmu_read(0x04), pmu_read(0x10), pmu_read(0x21), pmu_read(0x30),
                     pmu_read(0x4b), pmu_read(0x4c), pmu_read(0x4d));

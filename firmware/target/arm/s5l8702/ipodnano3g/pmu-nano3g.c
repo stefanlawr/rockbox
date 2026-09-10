@@ -112,16 +112,35 @@ void pmu_set_cpu_voltage(bool high)
 #endif
 
 #if (CONFIG_RTC == RTC_NANO3G)
+/* D1671 RTC, from the OF (FUN_0836c1e0 read / FUN_0836c418 write): six
+   *binary* registers 0x40..0x45 = sec, min, hour, mday, month, year (the
+   OF converts them to BCD after reading and from BCD before writing).
+   Bit 6 of the seconds register is a flag the OF masks on read and sets
+   on write. 0x46..0x4a hold the alarm (no seconds). The OF reads the six
+   registers in one transfer but writes them one at a time. Buffer layout
+   is Rockbox's 7-byte one (sec, min, hour, wday, mday, mon, year), binary;
+   wday is not stored. */
 void pmu_read_rtc(unsigned char* buffer)
 {
-    // TODO
-    (void) buffer;
+    unsigned char r[6];
+    pmu_read_multiple(0x40, 6, r);
+    buffer[0] = r[0] & 0x3f;
+    buffer[1] = r[1];
+    buffer[2] = r[2];
+    buffer[3] = 0;
+    buffer[4] = r[3];
+    buffer[5] = r[4];
+    buffer[6] = r[5];
 }
 
 void pmu_write_rtc(unsigned char* buffer)
 {
-    // TODO
-    (void) buffer;
+    pmu_write(0x40, (buffer[0] & 0x3f) | 0x40);
+    pmu_write(0x41, buffer[1]);
+    pmu_write(0x42, buffer[2]);
+    pmu_write(0x43, buffer[4]);
+    pmu_write(0x44, buffer[5]);
+    pmu_write(0x45, buffer[6]);
 }
 #endif
 
