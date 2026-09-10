@@ -616,17 +616,23 @@ int nand_read_sectors(IF_MD(int drive,) sector_t start, int incount,
     return ftl_read(start, incount, inbuf);
 }
 
+/* Read-only phase: writes are accepted and discarded. Returning an error
+   here makes Rockbox's disk cache panic on its first writeback at boot
+   (dc_writeback_callback), which is not useful while there is no FTL
+   write support. Nothing reaches the flash; changes simply do not
+   persist across a reboot. The count is shown in the dev bootloader. */
+uint32_t nand3g_stat_dropped_writes;
+
 int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
                       const void* outbuf)
 {
-    /* Read-only driver: never write. */
 #ifdef HAVE_MULTIDRIVE
     (void) drive;
 #endif
     (void) start;
-    (void) count;
     (void) outbuf;
-    return -1;
+    nand3g_stat_dropped_writes += count;
+    return 0;
 }
 
 int nand_event(long id, intptr_t data)
