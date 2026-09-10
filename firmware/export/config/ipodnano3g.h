@@ -91,6 +91,11 @@
 /* The NAND flash has 2048-byte sectors, and is our only storage */
 #define SECTOR_SIZE 2048
 
+/* The partition table and FAT filesystem written by iTunes use 4096-byte
+   sectors on top of the FTL's 2048-byte pages (verified on an MB245) */
+#define MAX_VIRT_SECTOR_SIZE 4096
+#define DEFAULT_VIRT_SECTOR_SIZE 4096
+
 /* LCD dimensions */
 #define LCD_WIDTH  320
 #define LCD_HEIGHT 240
