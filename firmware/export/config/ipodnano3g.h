@@ -127,10 +127,8 @@
 /* Define this to enable morse code input */
 #define HAVE_MORSE_INPUT
 
-// TODO
 /* define this if you have a real-time clock */
-//#define CONFIG_RTC RTC_NANO3G
-#define CONFIG_RTC  0
+#define CONFIG_RTC RTC_NANO3G
 
 /* Define if the device can wake from an RTC alarm */
 //#define HAVE_RTC_ALARM
