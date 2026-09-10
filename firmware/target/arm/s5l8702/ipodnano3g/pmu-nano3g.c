@@ -140,21 +140,34 @@ static struct mutex pmu_adc_mutex;
 unsigned short pmu_adc_raw2mv(
         const struct pmu_adc_channel *ch, unsigned short raw)
 {
-    // TODO
-    (void) ch;
-    (void) raw;
-    return 0;
+    if (!ch->mv_den)
+        return raw;
+    return raw * ch->mv_num / ch->mv_den + ch->mv_off;
+}
+
+unsigned short pmu_read_adc_raw(int mux, int bits8)
+{
+    unsigned short raw = 0;
+    int i;
+    mutex_lock(&pmu_adc_mutex);
+    pmu_write(0x30, 0x20 | (mux & 0x1f) | 0x08);   /* start conversion */
+    for (i = 0; i < 20; i++) {
+        udelay(200);
+        if (!(pmu_read(0x30) & 0x08))
+            break;
+    }
+    raw = pmu_read(0x32);
+    if (!bits8)
+        raw = (raw << 2) | (pmu_read(0x31) & 3);
+    pmu_write(0x30, 0x20);
+    mutex_unlock(&pmu_adc_mutex);
+    return raw;
 }
 
 /* returns raw value */
 unsigned short pmu_read_adc(const struct pmu_adc_channel *ch)
 {
-    // TODO
-    int raw = 0;
-    mutex_lock(&pmu_adc_mutex);
-    (void) ch;
-    mutex_unlock(&pmu_adc_mutex);
-    return raw;
+    return pmu_read_adc_raw(ch->mux, ch->bits8);
 }
 
 /*

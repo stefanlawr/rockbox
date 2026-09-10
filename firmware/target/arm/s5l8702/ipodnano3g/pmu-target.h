@@ -55,6 +55,9 @@ enum d1671_reg_statusa {
     D1671_STATUSA_VBUS      = 0x08,
     D1671_STATUSA_VADAPTOR  = 0x10,
     D1671_STATUSA_INPUT1    = 0x20,
+    D1671_STATUSA_CHARGING  = 0x40,     /* TBC: set on USB (OF reads it as
+                                           "power present" in one mode) */
+    D1671_STATUSA_ONBATT    = 0x01,     /* TBC: set only with no USB */
 };
 enum d1671_reg_statusb {
     D1671_STATUSB_INPUT2    = 0x01,
@@ -90,11 +93,20 @@ enum d1671_reg_chctl {
 /* GPIO for external PMU interrupt */
 #define GPIO_EINT_PMU   0x7b
 
+/* D1671 manual ADC, protocol recovered from the nano 3G OF (FUN_0836bf68):
+   write reg 0x30 = 0x20 | mux | 0x08 (start), poll bit 3 until clear,
+   result = reg 0x32 << 2 | (reg 0x31 & 3) (10 bit), then write 0x30 = 0x20.
+   The OF uses mux 0x13 for the thermistor (bias on) and reads it 8-bit averaged. */
 struct pmu_adc_channel
 {
     const char *name;
-    // TODO
+    unsigned char mux;      /* low bits written to reg 0x30 */
+    unsigned char bits8;    /* OF flag 2: 8-bit result (reg 0x32 only) */
+    unsigned short mv_num;  /* mV = raw * mv_num / mv_den + mv_off (TBC) */
+    unsigned short mv_den;
+    unsigned short mv_off;
 };
+unsigned short pmu_read_adc_raw(int mux, int bits8);
 
 void pmu_preinit(void);
 void pmu_init(void);

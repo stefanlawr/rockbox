@@ -60,7 +60,9 @@ unsigned int power_input_status(void)
 
 bool charging_state(void)
 {
-    // TODO
-    return false;
+    /* STATUSA read 0x4e on USB and 0x07 unplugged on an MB245: bit 6 (and
+       VBUS bit 3) come up with USB power, bit 0 goes away. TBC whether bit 6
+       clears when the charger terminates. */
+    return (pmu_read(D1671_REG_STATUSA) & D1671_STATUSA_CHARGING) != 0;
 }
 #endif /* CONFIG_CHARGING */
