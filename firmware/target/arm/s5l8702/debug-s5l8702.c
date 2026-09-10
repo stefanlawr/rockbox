@@ -155,6 +155,21 @@ bool dbg_hw_info(void)
                             adc_read_accessory_resistor());
             _DEBUG_PRINTF("USB D+: %d mV", adc_read_usbdata_voltage(true));
             _DEBUG_PRINTF("USB D-: %d mV", adc_read_usbdata_voltage(false));
+#ifdef IPOD_NANO3G
+            {
+                extern unsigned short pmu_read_adc_raw(int mux, int bits8);
+                _DEBUG_PRINTF("ADC raw m0 %d m1 %d m2 %d m3 %d",
+                    pmu_read_adc_raw(0,0), pmu_read_adc_raw(1,0),
+                    pmu_read_adc_raw(2,0), pmu_read_adc_raw(3,0));
+                _DEBUG_PRINTF("m4 %d m5 %d m6 %d m7 %d m13/8b %d",
+                    pmu_read_adc_raw(4,0), pmu_read_adc_raw(5,0),
+                    pmu_read_adc_raw(6,0), pmu_read_adc_raw(7,0),
+                    pmu_read_adc_raw(0x13,1));
+                _DEBUG_PRINTF("PMU r04 %02x r10 %02x r21 %02x r30 %02x r4b %02x r4c %02x r4d %02x",
+                    pmu_read(0x04), pmu_read(0x10), pmu_read(0x21), pmu_read(0x30),
+                    pmu_read(0x4b), pmu_read(0x4c), pmu_read(0x4d));
+            }
+#endif
             line++;
         }
 #ifdef IPOD_NANO3G
