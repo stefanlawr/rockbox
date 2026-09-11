@@ -1188,6 +1188,15 @@ static void ftl_wtest2(void)
            wt_back[3], wt_back[4], wt_back[5], wt_back[6], wt_back[7], wt_back[8], wt_back[9],
            wt_back[10], wt_back[11], wt_back[12], wt_back[13], wt_back[14], wt_back[15],
            wt_back[16], wt_back[17], wt_back[18], wt_back[19]);
+    {
+        extern uint32_t ftl_dbg_verify[6], ftl_dbg_guard[2], ftl_nano3g_remap_ok;
+        printf("verify: pages %lu, write fails %lu, verify fails %lu, copy fails %lu, guard %lu, remap %s",
+               (unsigned long)ftl_dbg_verify[3], (unsigned long)ftl_dbg_verify[0],
+               (unsigned long)ftl_dbg_verify[1], (unsigned long)ftl_dbg_verify[2],
+               (unsigned long)ftl_dbg_guard[0], ftl_nano3g_remap_ok ? "ok" : "NOT OK");
+        if (ftl_dbg_verify[0] || ftl_dbg_verify[1] || ftl_dbg_verify[2])
+            printf(" last bad vpage %lx bank/ppage %lx", (unsigned long)ftl_dbg_verify[4], (unsigned long)ftl_dbg_verify[5]);
+    }
 end:
     line++;
     lcd_set_foreground(LCD_RBYELLOW);
@@ -1236,6 +1245,15 @@ static void ftl_wtest1(void)
     int bad = 0; for (int i = 0; i < 4096; i++) if (wt_back[i] != wt_pat[i]) bad++;
     printf("readback %d bytes, %d differ from pattern: %c%c%c%c%c%c%c%c", n, bad,
            wt_back[0], wt_back[1], wt_back[2], wt_back[3], wt_back[4], wt_back[5], wt_back[6], wt_back[7]);
+    {
+        extern uint32_t ftl_dbg_verify[6], ftl_dbg_guard[2], ftl_nano3g_remap_ok;
+        printf("verify: pages %lu, write fails %lu, verify fails %lu, copy fails %lu, guard %lu, remap %s",
+               (unsigned long)ftl_dbg_verify[3], (unsigned long)ftl_dbg_verify[0],
+               (unsigned long)ftl_dbg_verify[1], (unsigned long)ftl_dbg_verify[2],
+               (unsigned long)ftl_dbg_guard[0], ftl_nano3g_remap_ok ? "ok" : "NOT OK");
+        if (ftl_dbg_verify[0] || ftl_dbg_verify[1] || ftl_dbg_verify[2])
+            printf(" last bad vpage %lx bank/ppage %lx", (unsigned long)ftl_dbg_verify[4], (unsigned long)ftl_dbg_verify[5]);
+    }
     printf("no ftl_sync: FTL context untouched, OF restores on next boot");
 end:
     line++;
