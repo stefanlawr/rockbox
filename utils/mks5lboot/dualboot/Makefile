@@ -27,8 +27,9 @@ LINKFILE = dualboot.lds
 # 1) add x to the list in TARGETS
 # 2) create a variable named OPT_x of the form:
 #    OPT_x=target specific defines
-TARGETS = ipod6g
+TARGETS = ipod6g ipodnano3g
 OPT_ipod6g = -DIPOD_6G -DMEMORYSIZE=64
+OPT_ipodnano3g = -DIPOD_NANO3G -DMEMORYSIZE=32
 
 LOADERS = install uninstall
 OPT_install =
@@ -50,6 +51,9 @@ SRCTARGET = piezo-.c
 $(foreach l, $(LOADERS), $(foreach t, $(TARGETS),\
 	$(eval SRC_$(l)_$(t) = $(addprefix $(FW8702)/$(t)/, $(subst -.,-$(subst ipod,,$(t)).,$(SRCTARGET))))))
 
+# autoconf.h is target independent; point AUTOCONF_DIR at any configured build dir
+AUTOCONF_DIR ?= $(ROOTDIR)/build-nano3g-boot-std
+INCLUDES += -I$(AUTOCONF_DIR)
 INCLUDES += -I. -I.. -I$(FIRMDIR) -I$(FWARM) -I$(FW8702)
 INCLUDES += $(addprefix -I$(FIRMDIR)/, export include libc/include kernel/include)
 # target/loader specific includes
@@ -71,7 +75,7 @@ all: $(BUILDDIR) $(OUTPUTDUALBOOT)
 
 $(BUILDDIR)$(PFX)%.lds: $(LINKFILE)
 	@echo Creating $@
-	$(SILENT)$(CROSS)$(CC) $(INC_$*) $(CFLAGS) $(OPT_$*) -E -x c - < $< | sed '/#/d' > $@
+	$(SILENT)$(CROSS)$(CC) $(INC_$*) $(CFLAGS) $(OPT_$*) -E -P -x c -include config.h - < $< | sed '/#/d' > $@
 
 $(BUILDDIR)$(PFX)%.arm-elf: $(BUILDDIR)$(PFX)%.lds $(SOURCES)
 	@echo CC -T $(notdir $^ $(SRC_$*))

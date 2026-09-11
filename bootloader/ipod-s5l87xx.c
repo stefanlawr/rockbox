@@ -1606,6 +1606,34 @@ static void vfl_remap_probe(void)
     while (button_status() != BUTTON_SELECT) sleep(HZ/100);
 }
 
+
+/* Read-only: identify the SPI NOR chip. The NOR driver uses the SST25
+   command set (AAI word program 0xAD, 4 KB sector erase 0x20, EWSR/WRSR
+   unlock); SST25VF080B answers JEDEC BF 25 8E. Anything else needs a
+   look before the dual-boot installer may write. Also reads the IM3
+   header at 32 KB and the free space of the flsh area. */
+static void nor_chip_id(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("NOR chip ID (read-only)");
+    uint8_t id[3], st;
+    bootflash_init(SPI_PORT);
+    bootflash_read_id(SPI_PORT, id, &st);
+    bootflash_close(SPI_PORT);
+    printf("JEDEC %02X %02X %02X  status %02X  (SST25VF080B = BF 25 8E)", id[0], id[1], id[2], st);
+    struct Im3Info hinfo;
+    int rc = im3_read(NORBOOT_OFF, &hinfo, NULL);
+    printf("IM3 @32K: rc %d enc %u data_sz %lu nor_sz %lu", rc, hinfo.enc_type,
+           (unsigned long)(hinfo.data_sz[0] | (hinfo.data_sz[1] << 8) | (hinfo.data_sz[2] << 16) | (hinfo.data_sz[3] << 24)),
+           (unsigned long)im3_nor_sz(&hinfo));
+    printf("flsh unused: %lu bytes", (unsigned long)flsh_get_unused());
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
 static volatile uint32_t dma_test_cbs;
@@ -2099,6 +2127,7 @@ static void devel_menu(void)
         "Low blocks probe (read-only)",
         "Find displaced pages (read-only)",
         "VFL remap probe (read-only)",
+        "NOR chip ID (read-only)",
         "Erase vblock 631 (garbage copy of lblock 0)",
         "FTL recover: force restore + mark unclean (0x4F)",
         "FTL write test 2: write + ftl_sync + write (dirty)",
@@ -2141,6 +2170,7 @@ static void devel_menu(void)
         low_blocks_probe,
         find_displaced_probe,
         vfl_remap_probe,
+        nor_chip_id,
         erase_631,
         ftl_recover,
         ftl_wtest2,

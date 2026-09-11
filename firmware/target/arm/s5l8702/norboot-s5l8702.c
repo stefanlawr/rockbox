@@ -80,6 +80,25 @@ static void bootflash_enable_writing(int port, bool state)
     }
 }
 
+/* Read-only identification: JEDEC ID (0x9F, 3 bytes) and the status
+   register (0x05). Used to confirm the chip type before any write. */
+void bootflash_read_id(int port, uint8_t id[3], uint8_t* status)
+{
+    spi_prepare(port);
+    bootflash_wait_ready(port);
+    bootflash_ce(port, true);
+    spi_write(port, 0x9f);
+    id[0] = spi_write(port, 0xff);
+    id[1] = spi_write(port, 0xff);
+    id[2] = spi_write(port, 0xff);
+    bootflash_ce(port, false);
+    bootflash_ce(port, true);
+    spi_write(port, 0x05);
+    *status = spi_write(port, 0xff);
+    bootflash_ce(port, false);
+    spi_release(port);
+}
+
 void bootflash_read(int port, uint32_t addr, uint32_t size, void* buf)
 {
     spi_prepare(port);
