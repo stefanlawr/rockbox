@@ -996,6 +996,147 @@ static uint8_t wt_back[4096] STORAGE_ALIGN_ATTR;
    then a second small write so the FTL leaves its dirty marker (type
    0x47) above the new context and the OF runs its restore on top of it
    rather than trusting the context blindly. ---- */
+static void mark_unclean_inplace(void)
+{
+    extern uint32_t ftl_unclean, ftl_dbg_ctrl[6];
+    extern uint32_t ftl_nano3g_mark_unclean(void);
+    extern void ftl_nano3g_vfl_dump(uint32_t, uint32_t*);
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("Mark unclean in current ctrl block");
+    int rc = storage_init();
+    uint32_t o[16]; ftl_nano3g_vfl_dump(0, o);
+    printf("storage_init %d unclean %lu; VFL ctrl list %lx %lx %lx", rc, (unsigned long)ftl_unclean,
+           (unsigned long)(o[13] & 0xffff), (unsigned long)(o[13] >> 16), (unsigned long)o[14]);
+    if (rc) goto end;
+    if (ftl_unclean) { printf("already unclean, nothing to do"); goto end; }
+    nand3g_write_enable = 1;
+    rc = ftl_nano3g_mark_unclean();
+    nand3g_write_enable = 0;
+    printf("mark 0x4F rc %d at vpage %lx = vblock %lu page %lu; writes %u", rc,
+           (unsigned long)ftl_dbg_ctrl[3], (unsigned long)(ftl_dbg_ctrl[3] / 1024),
+           (unsigned long)(ftl_dbg_ctrl[3] % 1024), nand3g_stat_writes);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+static void vfl_dump(void)
+{
+    extern void ftl_nano3g_vfl_dump(uint32_t, uint32_t*);
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("VFL state dump");
+    int rc = storage_init();
+    printf("storage_init %d", rc);
+    for (uint32_t b = 0; b < 2; b++)
+    {
+        uint32_t o[16];
+        ftl_nano3g_vfl_dump(b, o);
+        printf("bank %lu: usn %lx upd %lx act %lu nextpg %lu cksum %lu", (unsigned long)b,
+               (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[12]);
+        printf(" cxtblocks %lu %lu %lu %lu spare first %lu cnt %lu used %lu sched %lu",
+               (unsigned long)o[4], (unsigned long)o[5], (unsigned long)o[6], (unsigned long)o[7],
+               (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11]);
+        printf(" ftlctrl %lx %lx %lx", (unsigned long)(o[13] & 0xffff), (unsigned long)(o[13] >> 16), (unsigned long)o[14]);
+        /* raw spare of page 0 and of the latest cxt page in the active block */
+        uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+        uint32_t blk = o[4 + (o[2] & 3)];
+        for (uint32_t pg = 0; pg < 2; pg++)
+        {
+            uint32_t page = blk * 128 + (pg ? (o[3] ? o[3] - 1 : 0) : 0);
+            int r = nand3g_read_page(NAND3G_CTRL, b, page, buf, sp, &raw);
+            printf(" pblk %lu pg %lu: rc %d sp %08lx %08lx %08lx %02x%02x%02x%02x", (unsigned long)blk,
+                   (unsigned long)(page % 128), r, (unsigned long)sp[0], (unsigned long)sp[1], (unsigned long)sp[2],
+                   buf[0], buf[1], buf[2], buf[3]);
+        }
+        int r = nand3g_read_page(NAND3G_CTRL, b, 8191 * 128, buf, sp, &raw);
+        printf(" devinfo 8191/0: rc %d %c%c%c%c%c%c%c%c%c%c%c%c%c", r, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5],
+               buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12]);
+    }
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+static void erase_631(void)
+{
+    extern uint32_t ftl_nano3g_erase_vblock(uint32_t);
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("Erase vblock 631");
+    int rc = storage_init();
+    printf("storage_init %d", rc);
+    if (rc) goto end;
+    nand3g_write_enable = 1;
+    rc = ftl_nano3g_erase_vblock(631);
+    nand3g_write_enable = 0;
+    printf("erase vblock 631 rc %d; erases %u errors %u", rc, nand3g_stat_erases, nand3g_stat_write_errors);
+    {
+        uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+        int r = nand3g_read_page(NAND3G_CTRL, 0, (2 * 631) * 128, buf, sp, &raw);
+        printf("pblock %d page 0 after: rc %d sp %08lx data %02x%02x", 2 * 631, r, (unsigned long)sp[0], buf[0], buf[1]);
+    }
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+static void ftl_recover(void)
+{
+    extern uint32_t ftl_unclean, ftl_restore_stats[8], ftl_restore_mapdiff[3], ftl_dbg_ctrl[6];
+    extern uint32_t ftl_nano3g_force_restore(void);
+    extern uint32_t ftl_nano3g_mark_unclean(void);
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("FTL recover");
+    int rc = storage_init();
+    printf("storage_init %d unclean %lu ctrl %lx %lx %lx page %lx", rc, (unsigned long)ftl_unclean,
+           (unsigned long)ftl_dbg_ctrl[0], (unsigned long)ftl_dbg_ctrl[1], (unsigned long)ftl_dbg_ctrl[2],
+           (unsigned long)ftl_dbg_ctrl[3]);
+    if (rc) goto end;
+    rc = ftl_nano3g_force_restore();
+    printf("force restore rc %d logs %lu free %lu mapdiff %lu", rc, (unsigned long)ftl_restore_stats[1],
+           (unsigned long)ftl_restore_stats[2], (unsigned long)ftl_restore_stats[3]);
+    for (int i = 0; i < 3; i++)
+        printf(" diff %d: lblock %lu committed %lu rebuilt %lu", i,
+               (unsigned long)(ftl_restore_mapdiff[i] & 0xfff), (unsigned long)((ftl_restore_mapdiff[i] >> 12) & 0x3ff),
+               (unsigned long)(ftl_restore_mapdiff[i] >> 22));
+    if (rc) goto end;
+    uint8_t *buf = nand3g_page_buffer();
+    rc = ftl_read(0, 1, buf);
+    printf("sector 0 via rebuilt map: rc %d sig %02x%02x", rc, buf[510], buf[511]);
+    if (rc || buf[510] != 0x55 || buf[511] != 0xAA)
+    {
+        extern uint32_t ftl_nano3g_peek(uint32_t, uint32_t*, uint32_t*, uint32_t*, uint8_t*);
+        uint32_t blk[2] = { ftl_restore_mapdiff[0] >> 22, (ftl_restore_mapdiff[0] >> 12) & 0x3ff };
+        for (int b = 0; b < 2; b++)
+            for (uint32_t pg = 0; pg < 4; pg++)
+            {
+                uint32_t lpn, usn, type; uint8_t f[4];
+                uint32_t r = ftl_nano3g_peek(blk[b] * 1024 + pg, &lpn, &usn, &type, f);
+                printf(" vb %lu pg %lu: ret %lx lpn %lx usn %lx type %lx %02x%02x%02x%02x",
+                       (unsigned long)blk[b], (unsigned long)pg, (unsigned long)r, (unsigned long)lpn,
+                       (unsigned long)usn, (unsigned long)type, f[0], f[1], f[2], f[3]);
+            }
+        printf("sector 0 unreadable: marking unclean anyway so the OF rebuilds");
+    }
+    nand3g_write_enable = 1;
+    rc = ftl_nano3g_mark_unclean();
+    nand3g_write_enable = 0;
+    printf("mark unclean (0x4F) rc %d at page %lx; writes %u", rc, (unsigned long)ftl_dbg_ctrl[3], nand3g_stat_writes);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static void ftl_wtest2(void)
 {
     extern uint32_t ftl_unclean, ftl_restore_stats[8];
@@ -1688,6 +1829,10 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "Mark unclean in current ctrl block (no restore)",
+        "VFL state dump (read-only)",
+        "Erase vblock 631 (garbage copy of lblock 0)",
+        "FTL recover: force restore + mark unclean (0x4F)",
         "FTL write test 2: write + ftl_sync + write (dirty)",
         "FTL write test 1: rewrite testtone.wav head (no sync)",
         "NAND write test 1: find erased block (no write)",
@@ -1722,6 +1867,10 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        mark_unclean_inplace,
+        vfl_dump,
+        erase_631,
+        ftl_recover,
         ftl_wtest2,
         ftl_wtest1,
         nand_wtest_find,

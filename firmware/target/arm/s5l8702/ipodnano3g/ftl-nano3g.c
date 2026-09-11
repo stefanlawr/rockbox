@@ -393,7 +393,9 @@ uint32_t ftl_dbg[12];
 uint32_t ftl_unclean;          /* unclean marker seen above the FTL cxt */
 uint32_t ftl_restore_stats[8];
 uint32_t ftl_restore_dbg[8];
-uint32_t ftl_dbg_ctrl[6];   /* ctrl blocks, ctrl page, cxt usn, vfl commits */ /* rc, logs, free, map diffs, highest usn, scanned, empty, 0 */
+uint32_t ftl_dbg_ctrl[6];
+uint32_t ftl_restore_mapdiff[3]; /* lblock | old<<12 | new<<22 */
+uint32_t ftl_dbg_remap_wanted;   /* ctrl blocks, ctrl page, cxt usn, vfl commits */ /* rc, logs, free, map diffs, highest usn, scanned, empty, 0 */
 
 /* Block map, used vor pBlock to vBlock mapping */
 static uint16_t ftl_map[0x2000];
@@ -774,13 +776,10 @@ static uint32_t ftl_vfl_check_remap_scheduled(uint32_t bank, uint32_t block)
 /* Schedules remapping for the specified bank and vBlock */
 static void ftl_vfl_schedule_block_for_remap(uint32_t bank, uint32_t block)
 {
-    if (ftl_vfl_check_remap_scheduled(bank, block) == 1)
-        return;
-    panicf("FTL: Scheduling bank %u block %u for remap!", (unsigned)bank, (unsigned)block);
-    if (ftl_vfl_cxt[bank].scheduledstart == ftl_vfl_cxt[bank].spareused)
-        return;
-    ftl_vfl_cxt[bank].remaptable[--ftl_vfl_cxt[bank].scheduledstart] = block;
-    ftl_vfl_commit_cxt(bank);
+    /* nano 3G: spare-block remapping is not applied (the remap table
+       layout is unconfirmed), so never schedule one; just count it. */
+    (void)bank; (void)block;
+    ftl_dbg_remap_wanted++;
 }
 #endif
 
@@ -1327,7 +1326,7 @@ static uint32_t ftl_restore(void)
             }
         }
 
-        if (ftl_map[block] != mapc) mapdiff++;
+        if (ftl_map[block] != mapc) { if (mapdiff < 3) ftl_restore_mapdiff[mapdiff] = block | (ftl_map[block] << 12) | (mapc << 22); mapdiff++; }
         ftl_map[block] = mapc;
         rst_blockmap[mapc] = 0;
         if (logc != 0xFFFF)
@@ -2506,6 +2505,68 @@ uint32_t ftl_sync(void)
 }
 #endif
 
+
+#ifndef FTL_READONLY
+/* Force a restore regardless of the clean flag (dev tools). */
+uint32_t ftl_nano3g_force_restore(void)
+{
+    uint32_t rc;
+    mutex_lock(&ftl_mtx);
+    rc = ftl_restore();
+    mutex_unlock(&ftl_mtx);
+    return rc;
+}
+
+/* Write the OF's unclean marker (spare type 0x4F, openiBoot
+   ftl_mark_unclean) on the next control page so that Apple's firmware
+   rebuilds its state on the next boot instead of trusting the context. */
+uint32_t ftl_nano3g_mark_unclean(void)
+{
+    uint32_t rc;
+    mutex_lock(&ftl_mtx);
+    if (ftl_next_ctrl_pool_page() != 0) { mutex_unlock(&ftl_mtx); return 1; }
+    memset(ftl_buffer, 0xFF, 0x800);
+    memset(&ftl_sparebuffer[0], 0xFF, 0x40);
+    ftl_sparebuffer[0].meta.usn = ftl_cxt.usn;
+    ftl_sparebuffer[0].meta.type = 0x4F;
+    rc = ftl_vfl_write(ftl_cxt.ftlctrlpage, 1, ftl_buffer, &ftl_sparebuffer[0]);
+    ftl_cxt.clean_flag = 0;
+    ftl_dbg_ctrl_update();
+    mutex_unlock(&ftl_mtx);
+    return rc;
+}
+#endif
+
+/* dev: raw read of a vPage, returns ret and fills lpn/usn/type */
+uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t *type, uint8_t *first)
+{
+    uint32_t ret = ftl_vfl_read(vpage, ftl_buffer, &ftl_sparebuffer[0], 1, 0);
+    *lpn = ftl_sparebuffer[0].user.lpn; *usn = ftl_sparebuffer[0].user.usn;
+    *type = ftl_sparebuffer[0].user.type; memcpy(first, ftl_buffer, 4);
+    return ret;
+}
+
+/* dev: VFL context summary for a bank into out[16] */
+void ftl_nano3g_vfl_dump(uint32_t bank, uint32_t *out)
+{
+    struct ftl_vfl_cxt_type *c = &ftl_vfl_cxt[bank];
+    out[0] = c->usn; out[1] = c->updatecount; out[2] = c->activecxtblock; out[3] = c->nextcxtpage;
+    out[4] = c->vflcxtblocks[0]; out[5] = c->vflcxtblocks[1]; out[6] = c->vflcxtblocks[2]; out[7] = c->vflcxtblocks[3];
+    out[8] = c->firstspare; out[9] = c->sparecount; out[10] = c->spareused; out[11] = c->scheduledstart;
+    out[12] = ftl_vfl_verify_checksum(bank);
+    out[13] = c->ftlctrlblocks[0] | (c->ftlctrlblocks[1] << 16); out[14] = c->ftlctrlblocks[2];
+    out[15] = ftl_banks;
+}
+
+/* dev: erase one FTL vBlock (all 8 physical blocks). */
+uint32_t ftl_nano3g_erase_vblock(uint32_t vblock)
+{
+    uint32_t rc;
+    mutex_lock(&ftl_mtx);
+    rc = ftl_erase_block_internal(vblock);
+    mutex_unlock(&ftl_mtx);
+    return rc;
+}
 
 /* Initializes and mounts the FTL.
    As long as nothing was written, you won't need to unmount it.
