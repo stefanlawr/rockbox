@@ -668,6 +668,10 @@ uint32_t nand_read_page_fast(uint32_t page, void* databuffer,
 /* Write/erase glue for the FTL. Writes are gated by nand3g_write_enable so
    that a build with write support can still be run without touching the
    flash (restore-only mount tests). */
+/* Writes are OFF everywhere until the FTL block-copy path is fixed: the
+   2026-09-10 shutdown sync corrupted a superblock through
+   ftl_vfl_read_fast()/ftl_copy_block() and the device needed a full
+   restore. The dev bootloader tests enable writes explicitly. */
 int nand3g_write_enable = 0;
 unsigned nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors;
 
