@@ -265,10 +265,36 @@ static int launch_onb(int clkdiv)
        it will be replaced by ONB IM3 header, so this function must
        be called once!!! */
     struct Im3Info *hinfo = (struct Im3Info*)IRAM1_ORIG;
+    uint32_t onb_off;
+
+    if (memcmp(hinfo, IM3_IDENT, 4) == 0)
+    {
+        /* booted from NOR: the ONB sits right behind this bootloader */
+        onb_off = NORBOOT_OFF + im3_nor_sz(hinfo);
+    }
+    else
+    {
+        /* tethered (DFU): no IM3 header of our own in IRAM1. Look at the
+           image at NORBOOT_OFF: if it is the OF itself (known hash) launch
+           it, otherwise it is an installed RB bootloader and the ONB is
+           behind it. */
+        struct Im3Info first;
+        if (im3_read(NORBOOT_OFF, &first, NULL) != 0)
+            return -1;
+        onb_off = NORBOOT_OFF + im3_nor_sz(&first);
+#ifdef IPOD_NANO3G
+        unsigned char h[SIGN_SZ];
+        memcpy(h, first.u.enc12.data_sign, SIGN_SZ);
+        hwkeyaes(HWKEYAES_DECRYPT, HWKEYAES_UKEY, h, SIGN_SZ);
+        static const unsigned char of113[SIGN_SZ] =
+            { 0x60,0xAC,0x5A,0x12,0x38,0x65,0x0D,0x2B,0xC6,0x63,0x15,0x02,0xA0,0x44,0x84,0x39 };
+        if (memcmp(h, of113, SIGN_SZ) == 0)
+            onb_off = NORBOOT_OFF;
+#endif
+    }
 
     /* Loads ONB in IRAM0, exception vector table is destroyed !!! */
-    int rc = im3_read(
-            NORBOOT_OFF + im3_nor_sz(hinfo), hinfo, (void*)IRAM0_ORIG);
+    int rc = im3_read(onb_off, hinfo, (void*)IRAM0_ORIG);
 
     if (rc != 0) {
         /* Restore exception vector table */
