@@ -105,6 +105,13 @@ static uint16_t fatal[] = { 3000,500,500, 3000,500,500, 3000,500,0, 0 };
 #define sad2 (&fatal[3])
 #define sad  (&fatal[6])
 
+#if defined(IPOD_NANO3G)
+/* iPod nano 3G: decrypted hashes for known OFs (read from an MB245 with
+   the dev bootloader's "Show bootloader hash") */
+static unsigned char of_sha[][SIGN_SZ] = {
+    "\x60\xAC\x5A\x12\x38\x65\x0D\x2B\xC6\x63\x15\x02\xA0\x44\x84\x39", /* v1.1.3 */
+};
+#else
 /* iPod Classic: decrypted hashes for known OFs */
 static unsigned char of_sha[][SIGN_SZ] = {
     "\x31\xD1\x7A\x3A\x4B\x05\xE4\x09\x6B\x58\x31\x0A\xB7\x6C\x2F\x88", /* v1.0.1 */
@@ -117,6 +124,7 @@ static unsigned char of_sha[][SIGN_SZ] = {
     "\x06\x85\xDF\x28\xE4\xD7\xF4\x82\xC0\x73\xB0\x53\x26\xFC\xB0\xFE", /* v2.0.4 */
     "\x60\x80\x7D\x33\xA8\xDE\xF8\x49\xBB\xBE\x01\x45\xFF\x62\x40\x19"  /* v2.0.5 */
 };
+#endif
 #define N_OF (int)(sizeof(of_sha)/SIGN_SZ)
 
 /* we can assume that unknown FW is a RB bootloader */
