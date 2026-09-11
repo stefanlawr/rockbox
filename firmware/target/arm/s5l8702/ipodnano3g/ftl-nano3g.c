@@ -455,6 +455,7 @@ static union ftl_spare_data_type ftl_copyspare[FTL_COPYBUF_SIZE] STORAGE_ALIGN_A
 /* Needed to store the old scattered page offsets in order to be able to roll
    back if something fails while compacting a scattered page block. */
 static uint16_t ftl_offsets_backup[0x400] STORAGE_ALIGN_ATTR;
+#endif /* !FTL_READONLY */ /* verify+remap helpers below are used by all builds */
 
 /* nano 3G: every page write is read back and compared (data + the three
    metadata words) before it counts as done, and every block copy is
@@ -500,8 +501,6 @@ static uint32_t ftl_nano3g_phys_map(uint32_t physblock)
         return ftl_nano3g_spare_base() + (physblock - 2);
     return physblock;
 }
-
-#endif
 
 
 static struct mutex ftl_mtx;
