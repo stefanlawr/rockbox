@@ -265,6 +265,181 @@ static int nand3g_ecc_correct(uint32_t lo, uint32_t hi, uint32_t par)
     return rc ? NAND3G_ETIMEOUT_ECC : 0;
 }
 
+
+/* Write-side registers/values, transcribed from the OF's FMSS sequencer
+   programs (osos 1.1.3: erase = program at 0x8c30, single-page program =
+   0x9e98, i.e. "m1fmssEraseSingleBlock"/"m1fmssWriteScatteredPages"). */
+#define FMC3G_WCOL(c)       FMC3G_REG(c, 0x28)  /* parity column: chunk * 0x10 */
+#define FMC3G_STATB(c)      FMC3G_REG(c, 0x4C)  /* status byte after CTRL1 0xCA */
+#define CTRL1_W_SETUP       0x0FF3F8E0
+#define STAT_W_CLEARALL     0x0FF00FFE
+#define CTRL0_DMA_MODE      0x01000000
+#define CTRL1_W_DMAIN0      0x000002E0  /* DMA chunk memory -> buffer 0 */
+#define CTRL1_W_PARITY      0x00000034  /* 16 parity bytes buffer -> NAND */
+#define CTRL1_W_DATA_DMA    0x000002E4  /* 512 data bytes -> NAND + DMA next */
+#define CTRL1_W_DATA_LAST   0x000000E4  /* 512 data bytes -> NAND, no DMA */
+#define CTRL1_W_STATUS      0x000000CA
+#define CTRL1_W_STATUS_END  0x00000020
+#define SPARECTL_WRITE      0x00003210
+#define ECC3G_ENC(chunk)    (((chunk) << 16) | 0x1000 | (0x100 << ((chunk) & 1)) | 2)
+
+unsigned nand3g_dbg_wstat;
+unsigned nand3g_dbg_wstep, nand3g_dbg_wfail_stat, nand3g_dbg_wfail_ecc, nand3g_dbg_wfail_sp;
+
+/* Read the NAND status byte the OF way; returns byte or -1 on timeout. */
+static int nand3g_status_byte(int c)
+{
+    FMC3G_ADDR2(c) = 1;
+    FMC3G_CMD(c)   = 0x70;
+    if (wait_stat(c, STAT_RBB_DONE))
+        return -1;
+    FMC3G_CTRL1(c) = CTRL1_W_STATUS;
+    unsigned stop = USEC_TIMER + NAND3G_TIMEOUT_US;
+    while (!(FMC3G_STATB(c) & 0x40))
+        if (TIME_AFTER(USEC_TIMER, stop))
+            return -1;
+    int st = FMC3G_STATB(c) & 0xFF;
+    FMC3G_STAT(c)  = STAT_STATUS_DONE;
+    FMC3G_CTRL1(c) = CTRL1_W_STATUS_END;
+    nand3g_dbg_wstat = st;
+    return st;
+}
+
+static void nand3g_w_begin(int c, int ce)
+{
+    if (!nand3g_hw_ready[c])
+        nand3g_hw_init(c);
+    FMC3G_CTRL1(c) = CTRL1_W_SETUP;
+    FMC3G_STAT(c)  = STAT_W_CLEARALL;
+    FMC3G_CTRL0(c) = CTRL0_BASE | CTRL0_CE(ce);
+}
+
+/* Erase one physical block. 0 ok, 1 NAND fail bit, <0 timeout. */
+int nand3g_erase_block(int c, int ce, uint32_t block)
+{
+    if (c < 0 || c >= NAND3G_NUM_CTRL || ce < 0 || ce >= NAND3G_NUM_CE)
+        return NAND3G_EBADARG;
+    nand3g_w_begin(c, ce);
+
+    int st = nand3g_status_byte(c);
+    if (st < 0) { FMC3G_CTRL0(c) = CTRL0_DESELECT; return NAND3G_ETIMEOUT_STATUS; }
+
+    FMC3G_CMD(c) = 0x60;
+    if (wait_stat(c, STAT_RBB_DONE)) goto tmo;
+    FMC3G_ANUM(c)  = 2;                 /* three row cycles */
+    FMC3G_ADDR0(c) = block * NAND3G_PAGES_PER_BLOCK;
+    FMC3G_CTRL1(c) = CTRL1_XFER_ADDR;
+    if (wait_stat(c, STAT_CMD_DONE)) goto tmo;
+    FMC3G_CMD(c) = 0xD0;
+    if (wait_stat(c, STAT_RBB_DONE)) goto tmo;
+
+    st = nand3g_status_byte(c);
+    FMC3G_CTRL0(c) = CTRL0_DESELECT;
+    if (st < 0) return NAND3G_ETIMEOUT_STATUS;
+    return st & 1;
+tmo:
+    FMC3G_CTRL0(c) = CTRL0_DESELECT;
+    return NAND3G_ETIMEOUT_CMD;
+}
+
+static int nand3g_ecc_encode(uint32_t chunk)
+{
+    ECC3G_IRQSTAT = 0x1FF;
+    ECC3G_CONFIG  = 0x180;
+    ECC3G_START   = ECC3G_ENC(chunk);
+    /* encode completion is bit 0 (the OF program sequence clears bit 0 after
+       its ECC wait; decode uses bit 2). Observed IRQSTAT 0x33 while waiting. */
+    if (wait_set(&ECC3G_IRQSTAT, 0x1))
+        return NAND3G_ETIMEOUT_ECC;
+    ECC3G_IRQSTAT = 1;
+    return 0;
+}
+
+static void nand3g_dma_in(int c, const void *src, uint32_t chunk)
+{
+    FMC3G_DMADST(c) = (uintptr_t)src + chunk * 0x200;
+    FMC3G_UNK38(c)  = 7;
+}
+
+/* Program one page (2048 data bytes + 3 spare words), hardware ECC.
+   0 ok, 1 NAND reported fail, <0 timeout. */
+int nand3g_write_page(int c, int ce, uint32_t page,
+                      const void *data, const uint32_t spare[NAND3G_SPARE_WORDS])
+{
+    if (c < 0 || c >= NAND3G_NUM_CTRL || ce < 0 || ce >= NAND3G_NUM_CE)
+        return NAND3G_EBADARG;
+    commit_dcache_range(data, NAND3G_PAGE_SIZE);
+    nand3g_w_begin(c, ce);
+    FMC3G_CTRL0(c) |= CTRL0_DMA_MODE;
+
+    /* chunk 0 into buffer 0 */
+    nand3g_dma_in(c, data, 0);
+    FMC3G_DNUM(c)  = 0x1FF;
+    FMC3G_ADDR2(c) = 1;
+    FMC3G_CTRL1(c) = CTRL1_W_DMAIN0;
+
+    /* spare words */
+    FMC3G_SPARE0(c) = spare[0];
+    FMC3G_SPARE1(c) = spare[1];
+    FMC3G_SPARE2(c) = spare[2];
+    FMC3G_SPARECTL(c)  = SPARECTL_WRITE;
+    FMC3G_SPARETRIG(c) = 1;
+    { nand3g_dbg_wstep = 1; if (wait_clear(&FMC3G_SPARETRIG(c), 1)) goto tmo; }
+
+    { nand3g_dbg_wstep = 2; if (wait_stat(c, STAT_DATA_DONE)) goto tmo; }
+    { nand3g_dbg_wstep = 3; if (nand3g_ecc_encode(0)) goto tmo; }
+
+    FMC3G_CMD(c) = 0x80;
+    { nand3g_dbg_wstep = 4; if (wait_stat(c, STAT_RBB_DONE)) goto tmo; }
+    FMC3G_ANUM(c)  = 4;
+    FMC3G_ADDR0(c) = page << 16;
+    FMC3G_ADDR1(c) = page >> 16;
+    FMC3G_CTRL1(c) = CTRL1_XFER_ADDR;
+    { nand3g_dbg_wstep = 5; if (wait_stat(c, STAT_CMD_DONE)) goto tmo; }
+
+    for (uint32_t chunk = 0; chunk < 4; chunk++) {
+        /* 16 parity/meta bytes of this chunk */
+        FMC3G_DNUM(c)  = 0x0F;
+        FMC3G_ADDR2(c) = 0x1000;
+        FMC3G_WCOL(c)  = chunk * 0x10;
+        FMC3G_CTRL1(c) = CTRL1_W_PARITY;
+        { nand3g_dbg_wstep = 6; if (wait_stat(c, STAT_ADDR_DONE)) goto tmo; }
+
+        uint32_t bufbit = (chunk & 1) ? 0x200 : 0x100;
+        if (chunk < 3) {
+            /* data of this chunk -> NAND while DMA-ing the next chunk in */
+            nand3g_dma_in(c, data, chunk + 1);
+            FMC3G_ADDR2(c) = bufbit | ((chunk & 1) ? 0x1 : 0x2);
+            FMC3G_DNUM(c)  = 0x1FF;
+            FMC3G_CTRL1(c) = CTRL1_W_DATA_DMA;
+            { nand3g_dbg_wstep = 7; if (wait_stat(c, STAT_DATA_DONE)) goto tmo; }
+            { nand3g_dbg_wstep = 8; if (nand3g_ecc_encode(chunk + 1)) goto tmo; }
+            { nand3g_dbg_wstep = 9; if (wait_stat(c, STAT_ADDR_DONE)) goto tmo; }
+        } else {
+            FMC3G_CTRL0(c) &= ~CTRL0_DMA_MODE;
+            FMC3G_UNK38(c) = 7;
+            FMC3G_ADDR2(c) = bufbit;
+            FMC3G_DNUM(c)  = 0x1FF;
+            FMC3G_CTRL1(c) = CTRL1_W_DATA_LAST;
+            { nand3g_dbg_wstep = 10; if (wait_stat(c, STAT_ADDR_DONE)) goto tmo; }
+        }
+    }
+
+    FMC3G_CMD(c) = 0x10;
+    { nand3g_dbg_wstep = 11; if (wait_stat(c, STAT_RBB_DONE)) goto tmo; }
+
+    int st = nand3g_status_byte(c);
+    FMC3G_CTRL0(c) = CTRL0_DESELECT;
+    if (st < 0) return NAND3G_ETIMEOUT_STATUS;
+    return st & 1;
+tmo:
+    nand3g_dbg_wfail_stat = FMC3G_STAT(c);
+    nand3g_dbg_wfail_ecc  = ECC3G_IRQSTAT;
+    nand3g_dbg_wfail_sp   = FMC3G_SPARETRIG(c);
+    FMC3G_CTRL0(c) = CTRL0_DESELECT;
+    return NAND3G_ETIMEOUT_DATA;
+}
+
 int nand3g_read_page(int c, int ce, uint32_t page,
                      void *data, uint32_t spare[NAND3G_SPARE_WORDS],
                      uint32_t *raw_stat)

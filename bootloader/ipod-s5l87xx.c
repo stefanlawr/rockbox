@@ -975,6 +975,118 @@ static void i2s_tx_test(void)
    many DMA completion callbacks arrive in one second (expect ~20 for
    8 KiB chunks at 44.1 kHz stereo 16-bit) and the I2S status. */
 #include "dma-s5l8702.h"
+/* ---- NAND write test: uses one fully erased block in the VFL reserved
+   range at the top of die 0 (physical 7968..8190). Round trip: erase,
+   program page 0, read back, erase, verify blank. Net effect on the NAND:
+   one extra erase cycle on a block that was already erased. ---- */
+#define NAND3G_CTRL 0   /* FMC controller 0 (the one the NAND is on) */
+static int wtest_block = -1;
+static int wtest_page_empty(int ce, uint32_t page)
+{
+    uint8_t *buf = nand3g_page_buffer();
+    uint32_t sp[3]; uint32_t raw;
+    int r = nand3g_read_page(NAND3G_CTRL, ce, page, buf, sp, &raw);
+    if (r < 0) return 0;
+    if (sp[0] != 0xFFFFFFFF || sp[1] != 0xFFFFFFFF || sp[2] != 0xFFFFFFFF) return 0;
+    for (int i = 0; i < 2048; i++) if (buf[i] != 0xFF) return 0;
+    return 1;
+}
+static void nand_wtest_find(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("NAND write test 1: scan die 0 (ce 0)");
+    wtest_block = -1;
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);     /* cold reads misbehave without a chip reset */
+    /* DEVICEINFOBBT: block 8191 page 127 on CE0, bitmap at 0x38, 1 = good */
+    static uint8_t bbt[0x400];
+    memset(bbt, 0xFF, sizeof(bbt));
+    {
+        uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+        int found = -1;
+        /* Bank 6 = die 0, plane 1, upper half: physical odd blocks
+           4096 + 2*v + 1. Its DEVICEINFOBBT lives in the last 10% of its
+           virtual blocks (v >= 1843), any page. Scan from the top. */
+        for (int b = 8191; b >= 7373 && found < 0; b--) {   /* last 10%, as the FTL */
+            int bad = 0;
+            for (int pg = 0; pg < 128 && bad <= 2; pg++) {
+                int r = nand3g_read_page(NAND3G_CTRL, 0, b * 128 + pg, buf, sp, &raw);
+                if (r < 0 || r == NAND3G_ECC_UNCORRECTABLE) { bad++; continue; }
+                if (memcmp(buf, "DEVICEINFOBBT\0\0\0", 0x10) == 0) { found = b * 128 + pg; break; }
+            }
+        }
+        if (found >= 0) {
+            uint32_t len = *(uint32_t *)&buf[0x34];
+            if (len > sizeof(bbt)) len = sizeof(bbt);
+            memcpy(bbt, &buf[0x38], len);
+            /* bitmap is indexed by the bank's virtual block: v = (b-4096)/2 */
+            int v = 8189;   /* bitmap indexed by physical block on this die */
+            printf("BBT at page %d (%lu bytes), 8189 (v%d) marked %s", found, (unsigned long)len, v,
+                   (bbt[v >> 3] >> (v & 7)) & 1 ? "good" : "BAD");
+        } else
+            printf("BBT not found in blocks 7373..8191, assuming all good");
+    }
+    int nbad = 0;
+    for (int b = 8190; b >= 7968; b--) {
+        int v = b;
+        if (b == 8189) continue;   /* erase failed there (status E1): likely a bad block */
+        if (!((bbt[v >> 3] >> (v & 7)) & 1)) { nbad++; continue; }
+        uint32_t base = b * 128;
+        if (wtest_page_empty(0, base) && wtest_page_empty(0, base + 1) &&
+            wtest_page_empty(0, base + 64) && wtest_page_empty(0, base + 127)) {
+            wtest_block = b; break;
+        }
+    }
+    printf("bad blocks skipped in range: %d", nbad);
+    if (wtest_block < 0) printf("no fully erased good block in 7968..8190");
+    else printf("erased good block found: %d (pages %d..%d)", wtest_block, wtest_block*128, wtest_block*128+127);
+    printf("nothing was written. Test 2 uses this block.");
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+static uint8_t wtest_data[2048] STORAGE_ALIGN_ATTR;
+static void nand_wtest_run(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("NAND write test 2");
+    if (wtest_block < 0) { printf("run test 1 first"); goto end; }
+    uint32_t page = wtest_block * 128;
+    int r;
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+    r = nand3g_erase_block(NAND3G_CTRL, 0, wtest_block);
+    printf("erase block %d: rc %d (status %02x)", wtest_block, r, nand3g_dbg_wstat);
+    if (r) goto end;
+    for (int i = 0; i < 2048; i++) wtest_data[i] = (uint8_t)(i * 7 + 3) ^ 0xA5;
+    uint32_t sp[3] = { 0x12345678, 0x9ABCDEF0, 0x0F0F00FF };
+    r = nand3g_write_page(NAND3G_CTRL, 0, page, wtest_data, sp);
+    printf("program page %lu: rc %d (status %02x)", (unsigned long)page, r, nand3g_dbg_wstat);
+    if (r < 0)
+        printf(" timeout at wait %u: STAT %08x ECC %08x SPTRIG %x", nand3g_dbg_wstep,
+               nand3g_dbg_wfail_stat, nand3g_dbg_wfail_ecc, nand3g_dbg_wfail_sp);
+    {
+        uint8_t *buf = nand3g_page_buffer(); uint32_t rs[3]; uint32_t raw;
+        int rr = nand3g_read_page(NAND3G_CTRL, 0, page, buf, rs, &raw);
+        int bad = 0; for (int i = 0; i < 2048; i++) if (buf[i] != wtest_data[i]) bad++;
+        printf("readback: ecc rc %d raw %08lx, %d data bytes differ", rr, (unsigned long)raw, bad);
+        printf("spare %08lx %08lx %08lx", (unsigned long)rs[0], (unsigned long)rs[1], (unsigned long)rs[2]);
+        printf("first bytes %02x %02x %02x %02x (want %02x %02x %02x %02x)",
+               buf[0], buf[1], buf[2], buf[3], wtest_data[0], wtest_data[1], wtest_data[2], wtest_data[3]);
+    }
+    r = nand3g_erase_block(NAND3G_CTRL, 0, wtest_block);
+    printf("erase again: rc %d (status %02x)", r, nand3g_dbg_wstat);
+    printf("page 0 blank again: %s", wtest_page_empty(0, page) ? "yes" : "NO");
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
 static volatile uint32_t dma_test_cbs;
@@ -1423,6 +1535,8 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "NAND write test 1: find erased block (no write)",
+        "NAND write test 2: ERASE+PROGRAM that block",
         "DMA playback test (tone via DMA)",
         "I2S TX test (3 instances)",
         "I2C scan / codec identify",
@@ -1453,6 +1567,8 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        nand_wtest_find,
+        nand_wtest_run,
         dma_play_test,
         i2s_tx_test,
         i2c_scan,
