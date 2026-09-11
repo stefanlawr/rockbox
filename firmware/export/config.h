@@ -1372,7 +1372,9 @@ Lyre prototype 1 */
 
 /* enable usb storage for targets that do bootloader usb */
 #if defined(HAVE_BOOTLOADER_USB_MODE)
+#ifndef USB_NO_STORAGE_NANO3G
 #define USB_ENABLE_STORAGE
+#endif
 #endif
 
 #else /* BOOTLOADER */
@@ -1380,7 +1382,9 @@ Lyre prototype 1 */
 #if (CONFIG_PLATFORM & PLATFORM_NATIVE)
 #ifdef USB_HAS_BULK
 //#define USB_ENABLE_SERIAL
+#ifndef USB_NO_STORAGE_NANO3G
 #define USB_ENABLE_STORAGE
+#endif
 #endif /* USB_HAS_BULK */
 
 #ifdef USB_HAS_INTERRUPT

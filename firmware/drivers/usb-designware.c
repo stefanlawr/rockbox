@@ -1030,10 +1030,22 @@ static void usb_dw_oepint(int ep)
     }
 }
 
+#ifdef IPOD_NANO3G
+unsigned usb_dbg_irqs, usb_dbg_rst, usb_dbg_enumdne, usb_dbg_setups, usb_dbg_oep, usb_dbg_iep;
+uint32_t usb_dbg_dsts, usb_dbg_gintsts_last, usb_dbg_doepint0;
+#endif
 static void usb_dw_irq(void)
 {
     int ep;
     uint32_t gintsts = DWC_GINTSTS & DWC_GINTMSK;
+#ifdef IPOD_NANO3G
+    usb_dbg_irqs++;
+    usb_dbg_gintsts_last = gintsts;
+    if (gintsts & USBRST) usb_dbg_rst++;
+    if (gintsts & ENUMDNE) { usb_dbg_enumdne++; usb_dbg_dsts = DWC_DSTS; }
+    if (gintsts & OEPINT) { usb_dbg_oep++; usb_dbg_doepint0 = DWC_DOEPINT(0); if (DWC_DOEPINT(0) & STUP) usb_dbg_setups++; }
+    if (gintsts & IEPINT) usb_dbg_iep++;
+#endif
 
 #ifdef USB_DW_ARCH_SLAVE
     /* Handle one packet at a time, the IRQ will re-trigger if there's

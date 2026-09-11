@@ -234,6 +234,9 @@
 /* logf() over USB serial (http://www.rockbox.org/wiki/PortalPlayerUsb) */
 //#define USB_ENABLE_SERIAL
 #define HAVE_USBSTACK
+/* No mass storage until FTL writes are enabled again (the host would
+   see its writes vanish). HID only for now. */
+#define USB_NO_STORAGE_NANO3G
 #define HAVE_USB_HID_MOUSE
 #define USB_VENDOR_ID 0x05AC
 #define USB_PRODUCT_ID 0x1262
