@@ -59,7 +59,7 @@ bool dbg_hw_info(void)
 #ifdef UC87XX_DEBUG
     const unsigned int max_states=3;
 #elif defined(IPOD_NANO3G)
-    const unsigned int max_states=4;
+    const unsigned int max_states=5;
 #else
     const unsigned int max_states=2;
 #endif
@@ -212,6 +212,31 @@ bool dbg_hw_info(void)
             if (usb_dbg_clocks_on)
                 _DEBUG_PRINTF("doepctl0 %08lx doeptsiz0 %08lx gahbcfg %08lx daint %08lx",
                               DWC_DOEPCTL(0), DWC_DOEPTSIZ(0), DWC_GAHBCFG, DWC_DAINT);
+        }
+#endif
+#ifdef IPOD_NANO3G
+        else if(state==4)
+        {
+            extern void ftl_nano3g_state(uint32_t *out);
+            extern uint32_t ftl_dbg_verify[6], ftl_dbg_guard[2], ftl_dbg_badrelease[2], ftl_dbg_ctrlrot[2];
+            extern unsigned nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors;
+            uint32_t o[16]; ftl_nano3g_state(o);
+            _DEBUG_PRINTF("FTL debug:");
+            _DEBUG_PRINTF("ctrl %lu %lu %lu page %lx (blk %lu pg %lu) usn %lx",
+                          o[0], o[1], o[2], o[3], o[3] / 1024, o[3] % 1024, o[4]);
+            _DEBUG_PRINTF("pool free %lu idx %lu logs %lu clean %lu unclean-at-mount %lu",
+                          o[5], o[6], o[15], o[7], o[8]);
+            _DEBUG_PRINTF("VFL0 ctrl %lx %lx %lx usn %lx  VFL1 ctrl %lx %lx %lx usn %lx",
+                          o[9] & 0xffff, o[9] >> 16, o[10] & 0xffff, o[10] >> 16,
+                          o[11] & 0xffff, o[11] >> 16, o[12] & 0xffff, o[12] >> 16);
+            _DEBUG_PRINTF("VFL nextpg %lu / %lu   ctrl ok %lu remap ok %lu",
+                          o[13] & 0xffff, o[13] >> 16, o[14] & 1, (o[14] >> 1) & 1);
+            _DEBUG_PRINTF("writes %u erases %u errs %u verified %lu vfail %lu cfail %lu",
+                          nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors,
+                          ftl_dbg_verify[3], ftl_dbg_verify[1], ftl_dbg_verify[2]);
+            _DEBUG_PRINTF("guard %lu (%lx) badrelease %lu (%lu) rotations %lu (last %lu->%lu)",
+                          ftl_dbg_guard[0], ftl_dbg_guard[1], ftl_dbg_badrelease[0], ftl_dbg_badrelease[1],
+                          ftl_dbg_ctrlrot[0], ftl_dbg_ctrlrot[1] & 0xffff, ftl_dbg_ctrlrot[1] >> 16);
         }
 #endif
 #ifdef UC87XX_DEBUG
