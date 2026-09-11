@@ -490,6 +490,7 @@ static uint32_t ftl_nano3g_phys_reserved(uint32_t physblock)
    ftl_nano3g_check_remap() confirms this against the flash at mount time
    and writes are refused if it does not hold. */
 uint32_t ftl_nano3g_remap_ok;        /* 1 after a successful check */
+uint32_t ftl_nano3g_ctrl_ok;         /* control block list sane at mount */
 uint32_t ftl_nano3g_remap_info[6];   /* per substitute: lpn of page 0 (or ~0) on die 0/1 */
 static uint32_t ftl_nano3g_spare_base(void)
 {
@@ -701,13 +702,10 @@ static uint32_t ftl_vfl_commit_cxt(uint32_t bank)
         if (ftl_vfl_store_cxt(bank) == 0) return 0;
     uint32_t current = ftl_vfl_cxt[bank].activecxtblock;
     uint32_t i = current, j;
-    /* nano 3G: the ring slots after the active one are NOT physical block
-       numbers we understand (physical 2..4 carry FTL user data), so never
-       rotate; 128 pages = 16 commits per slot, the MB245 has used 8. */
-    ftl_dbg_guard[0]++;
-    ftl_dbg_guard[1] = 0xFFFF0000 | bank;
-    DEBUGF("FTL: VFL: context block full on bank %u, rotation refused\n", (unsigned)bank);
-    return 1;
+    /* nano 3G: the ring slots are physical blocks 1..4 of the die; the
+       FTL data that would have lived in 2..4 sits in the spare blocks
+       3920..3922 (ftl_nano3g_phys_map), so rotating into them is what the
+       OF does too. */
     while (1)
     {
         i = (i + 1) & 3;
@@ -1713,6 +1711,18 @@ static uint32_t ftl_open(void)
 
 #ifndef FTL_READONLY
     ftl_nano3g_check_remap();
+    ftl_nano3g_ctrl_ok = 1;
+    for (i = 0; i < 3; i++)
+        if (ftl_cxt.ftlctrlblocks[i] == 0
+         || ftl_cxt.ftlctrlblocks[i] > (uint32_t)ftl_nand_type->userblocks + 23)
+            ftl_nano3g_ctrl_ok = 0;
+    if (ftl_cxt.ftlctrlpage / ppb != ftl_cxt.ftlctrlblocks[0]
+     && ftl_cxt.ftlctrlpage / ppb != ftl_cxt.ftlctrlblocks[1]
+     && ftl_cxt.ftlctrlpage / ppb != ftl_cxt.ftlctrlblocks[2])
+        ftl_nano3g_ctrl_ok = 0;
+    DEBUGF("FTL: control blocks %u %u %u page %u: %s\n", ftl_cxt.ftlctrlblocks[0],
+           ftl_cxt.ftlctrlblocks[1], ftl_cxt.ftlctrlblocks[2], ftl_cxt.ftlctrlpage,
+           ftl_nano3g_ctrl_ok ? "ok" : "BAD, writes refused");
 #endif
 
 #ifdef FTL_DEBUG
@@ -1954,10 +1964,21 @@ static uint32_t ftl_vblock_is_empty(uint32_t block)
     return (r0 & 2) && (r1 & 2);
 }
 
+uint32_t ftl_dbg_badrelease[2];   /* count, last value */
+uint32_t ftl_dbg_ctrlrot[2];      /* rotations, last old|new<<16 */
 static void ftl_release_pool_block(uint32_t block)
 {
-    if (block >= (uint32_t)ftl_nand_type->userblocks + 0x17)
-        panicf("FTL: Tried to release block %u", (unsigned)block);
+    if (block == 0 || block >= (uint32_t)ftl_nand_type->userblocks + 0x18)
+    {
+        /* A bogus block number reached the pool logic (seen once on the
+           MB245: 32779 at a control block rotation during shutdown).
+           Dropping it only loses a pool slot, which the next restore
+           recounts; acting on it could erase a random block. */
+        ftl_dbg_badrelease[0]++;
+        ftl_dbg_badrelease[1] = block;
+        DEBUGF("FTL: ignoring release of bogus block %u\n", (unsigned)block);
+        return;
+    }
     /* nano 3G: keep the free pool erased. A failed erase is not fatal
        here: the allocator erases again before use. */
     if (!ftl_vblock_is_empty(block))
@@ -2019,9 +2040,12 @@ static uint32_t ftl_next_ctrl_pool_page(void)
         if ((ftl_cxt.ftlctrlblocks[i] + 1) * ppb == ftl_cxt.ftlctrlpage)
             break;
     i = (i + 1) % 3;
+    uint32_t slot = i;
     uint32_t oldblock = ftl_cxt.ftlctrlblocks[i];
     uint32_t newblock = ftl_allocate_pool_block();
     if (newblock == 0xFFFFFFFF) return 1;
+    ftl_dbg_ctrlrot[0]++;
+    ftl_dbg_ctrlrot[1] = oldblock | (newblock << 16);
     ftl_cxt.ftlctrlblocks[i] = newblock;
     ftl_cxt.ftlctrlpage = newblock * ppb;
     DEBUGF("Starting new FTL control block at %d\n", ftl_cxt.ftlctrlpage);
@@ -2034,8 +2058,8 @@ static uint32_t ftl_next_ctrl_pool_page(void)
             ftl_cxt.usn--;
             if (ftl_save_erasectr_page(i) != 0)
             {
-                ftl_cxt.ftlctrlblocks[i] = oldblock;
-                ftl_cxt.ftlctrlpage = oldblock * (ppb + 1) - 1;
+                ftl_cxt.ftlctrlblocks[slot] = oldblock;
+                ftl_cxt.ftlctrlpage = (oldblock + 1) * ppb - 1;
                 ftl_release_pool_block(newblock);
                 return 1;
             }
@@ -2487,6 +2511,11 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
         DEBUGF("FTL: reserved-block substitution unverified, refusing to write\n");
         return -10;
     }
+    if (!ftl_nano3g_ctrl_ok)
+    {
+        DEBUGF("FTL: control block list not sane, refusing to write\n");
+        return -11;
+    }
     /* nano 3G: spare-block remapping is not applied by ftl_vfl_read/write,
        so a device with remapped blocks must stay read-only. */
     for (i = 0; i < ftl_banks; i++)
@@ -2765,6 +2794,23 @@ uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t 
 }
 
 /* dev: VFL context summary for a bank into out[16] */
+/* debug screen: current FTL control state */
+void ftl_nano3g_state(uint32_t *out)
+{
+    out[0] = ftl_cxt.ftlctrlblocks[0]; out[1] = ftl_cxt.ftlctrlblocks[1]; out[2] = ftl_cxt.ftlctrlblocks[2];
+    out[3] = ftl_cxt.ftlctrlpage; out[4] = ftl_cxt.usn; out[5] = ftl_cxt.freecount;
+    out[6] = ftl_cxt.nextfreeidx; out[7] = ftl_cxt.clean_flag; out[8] = ftl_unclean;
+    out[9] = ftl_vfl_cxt[0].ftlctrlblocks[0] | (ftl_vfl_cxt[0].ftlctrlblocks[1] << 16);
+    out[10] = ftl_vfl_cxt[0].ftlctrlblocks[2] | (ftl_vfl_cxt[0].usn << 16);
+    out[11] = ftl_vfl_cxt[1].ftlctrlblocks[0] | (ftl_vfl_cxt[1].ftlctrlblocks[1] << 16);
+    out[12] = ftl_vfl_cxt[1].ftlctrlblocks[2] | (ftl_vfl_cxt[1].usn << 16);
+    out[13] = ftl_vfl_cxt[0].nextcxtpage | (ftl_vfl_cxt[1].nextcxtpage << 16);
+    out[14] = ftl_nano3g_ctrl_ok | (ftl_nano3g_remap_ok << 1);
+    uint32_t logs = 0, i;
+    for (i = 0; i < 0x11; i++) if (ftl_log[i].scatteredvblock != 0xFFFF) logs++;
+    out[15] = logs;
+}
+
 /* dev: where does the OF's FTL space live? out[0] map min, [1] map max,
    [2] lBlock mapped to vBlock 1 (0xFFFF none), [3] same for vBlock 2,
    [4] pool min, [5] pool max, [6..8] ctrl blocks, [9] number of map

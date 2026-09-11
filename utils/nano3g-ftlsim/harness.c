@@ -126,9 +126,11 @@ static void check_pool(const char *what)
     }
     for (int i = 0; i < 3; i++) {
         uint32_t v = ftl_cxt.ftlctrlblocks[i];
-        CHECK(!seen[v], "%s: ctrl block %u also in use elsewhere", what, v);
-        seen[v] = 1;
+        CHECK(v >= 1 && v <= ftl_nand_type->userblocks + 23, "%s: ctrl block[%d] = %u out of range", what, i, v);
+        if (v < 0x2000) { CHECK(!seen[v], "%s: ctrl block %u also in use elsewhere", what, v); seen[v] = 1; }
     }
+    CHECK(ftl_cxt.ftlctrlpage / ppb == ftl_cxt.ftlctrlblocks[0] || ftl_cxt.ftlctrlpage / ppb == ftl_cxt.ftlctrlblocks[1]
+          || ftl_cxt.ftlctrlpage / ppb == ftl_cxt.ftlctrlblocks[2], "%s: ctrl page %u not inside a ctrl block", what, ftl_cxt.ftlctrlpage);
 }
 
 static void check_sim(const char *what)
@@ -390,6 +392,29 @@ int main(int argc, char **argv)
         remount("S7"); check_all("S7 remounted"); check_pool("S7 remounted");
         report("S7");
     }
+
+    printf("S8: 25 boot cycles: remount (restore), small write, sync, sync again (USB exit), shutdown sync\n");
+    for (int c = 0; c < 25; c++) {
+        remount("S8 cycle");
+        check_pool("S8 mounted");
+        do_write(50 * 1024 + (c * 37) % 1024, 1 + (c % 3)); note_touched(50 * 1024, 1024);
+        CHECK(ftl_sync() == 0, "S8 sync a (cycle %d)", c);
+        check_pool("S8 after sync a");
+        CHECK(ftl_sync() == 0, "S8 sync b (cycle %d)", c);
+        check_pool("S8 after sync b");
+        check_sim("S8");
+        if (failures) break;
+    }
+    check_all("S8"); report("S8");
+    printf("  ctrl blocks now %u %u %u page %u, VFL nextcxtpage %u/%u\n", ftl_cxt.ftlctrlblocks[0], ftl_cxt.ftlctrlblocks[1],
+           ftl_cxt.ftlctrlblocks[2], ftl_cxt.ftlctrlpage, ftl_vfl_cxt[0].nextcxtpage, ftl_vfl_cxt[1].nextcxtpage);
+
+    printf("S9: sync with nothing to do, three times, then remount\n");
+    CHECK(ftl_sync() == 0, "S9 sync 1"); check_pool("S9 1");
+    CHECK(ftl_sync() == 0, "S9 sync 2"); check_pool("S9 2");
+    CHECK(ftl_sync() == 0, "S9 sync 3"); check_pool("S9 3");
+    remount("S9"); check_all("S9 remounted"); check_pool("S9 remounted"); check_sim("S9");
+    report("S9");
 
     printf("\n%s: %d failure(s)\n", failures ? "RESULT: FAIL" : "RESULT: PASS", failures);
     return failures ? 1 : 0;
