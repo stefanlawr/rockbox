@@ -831,10 +831,12 @@ int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
 #ifdef HAVE_MULTIDRIVE
     (void) drive;
 #endif
-    (void) start;
-    (void) outbuf;
-    nand3g_stat_dropped_writes += count;
-    return 0;
+    if (!nand3g_write_enable)
+    {
+        nand3g_stat_dropped_writes += count;
+        return 0;
+    }
+    return ftl_write(start, count, outbuf) ? -1 : 0;
 }
 
 int nand_event(long id, intptr_t data)

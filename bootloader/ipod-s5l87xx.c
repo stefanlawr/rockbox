@@ -980,6 +980,66 @@ static void i2s_tx_test(void)
    program page 0, read back, erase, verify blank. Net effect on the NAND:
    one extra erase cycle on a block that was already erased. ---- */
 #define NAND3G_CTRL 0   /* FMC controller 0 (the one the NAND is on) */
+
+/* ---- FTL write test 1: mount (with restore), overwrite the first 4 KiB
+   of /testtone.wav through the file API with a pattern, read it back.
+   User pages only: a pool block gets erased and a few pages programmed
+   in it; no FTL context / control block is written (no ftl_sync). ---- */
+#include "file.h"
+#include "disk.h"
+#include "storage.h"
+static uint8_t wt_orig[4096] STORAGE_ALIGN_ATTR;
+static uint8_t wt_pat[4096] STORAGE_ALIGN_ATTR;
+static uint8_t wt_back[4096] STORAGE_ALIGN_ATTR;
+static void ftl_wtest1(void)
+{
+    extern uint32_t ftl_unclean, ftl_restore_stats[8];
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("FTL write test 1");
+    int rc = storage_init();
+    printf("storage_init %d, unclean %lu restore rc %lu logs %lu free %lu", rc,
+           (unsigned long)ftl_unclean, (unsigned long)ftl_restore_stats[0],
+           (unsigned long)ftl_restore_stats[1], (unsigned long)ftl_restore_stats[2]);
+    if (rc) goto end;
+    filesystem_init();
+    rc = disk_mount_all();
+    printf("disk_mount_all %d", rc);
+    if (rc <= 0) goto end;
+
+    int fd = open("/testtone.wav", O_RDONLY);
+    if (fd < 0) { printf("open testtone.wav failed %d", fd); goto end; }
+    int n = read(fd, wt_orig, 4096);
+    close(fd);
+    printf("orig: read %d, head %02x %02x %02x %02x (%c%c%c%c)", n,
+           wt_orig[0], wt_orig[1], wt_orig[2], wt_orig[3],
+           wt_orig[0], wt_orig[1], wt_orig[2], wt_orig[3]);
+    if (n != 4096) goto end;
+
+    for (int i = 0; i < 4096; i++) wt_pat[i] = "NANO3G-WRITE-TEST-1 "[i % 20];
+    nand3g_write_enable = 1;
+    fd = open("/testtone.wav", O_WRONLY);
+    if (fd < 0) { printf("open for write failed %d", fd); nand3g_write_enable = 0; goto end; }
+    n = write(fd, wt_pat, 4096);
+    rc = close(fd);
+    printf("write %d close %d; nand writes %u erases %u errors %u", n, rc,
+           nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors);
+    nand3g_write_enable = 0;
+
+    fd = open("/testtone.wav", O_RDONLY);
+    n = read(fd, wt_back, 4096);
+    close(fd);
+    int bad = 0; for (int i = 0; i < 4096; i++) if (wt_back[i] != wt_pat[i]) bad++;
+    printf("readback %d bytes, %d differ from pattern: %c%c%c%c%c%c%c%c", n, bad,
+           wt_back[0], wt_back[1], wt_back[2], wt_back[3], wt_back[4], wt_back[5], wt_back[6], wt_back[7]);
+    printf("no ftl_sync: FTL context untouched, OF restores on next boot");
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static int wtest_block = -1;
 static int wtest_page_empty(int ce, uint32_t page)
 {
@@ -1564,6 +1624,7 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "FTL write test 1: rewrite testtone.wav head (no sync)",
         "NAND write test 1: find erased block (no write)",
         "NAND write test 2: ERASE+PROGRAM that block",
         "DMA playback test (tone via DMA)",
@@ -1596,6 +1657,7 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        ftl_wtest1,
         nand_wtest_find,
         nand_wtest_run,
         dma_play_test,
