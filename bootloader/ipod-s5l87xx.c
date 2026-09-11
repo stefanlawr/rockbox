@@ -267,17 +267,12 @@ static int launch_onb(int clkdiv)
     struct Im3Info *hinfo = (struct Im3Info*)IRAM1_ORIG;
     uint32_t onb_off;
 
-    if (memcmp(hinfo, IM3_IDENT, 4) == 0)
     {
-        /* booted from NOR: the ONB sits right behind this bootloader */
-        onb_off = NORBOOT_OFF + im3_nor_sz(hinfo);
-    }
-    else
-    {
-        /* tethered (DFU): no IM3 header of our own in IRAM1. Look at the
-           image at NORBOOT_OFF: if it is the OF itself (known hash) launch
-           it, otherwise it is an installed RB bootloader and the ONB is
-           behind it. */
+        /* Derive the ONB location from the NOR itself, which works both
+           when booted from NOR and when tethered (DFU leaves unrelated
+           data in the IRAM1 header area). If the image at NORBOOT_OFF is
+           the OF (known hash) launch it, otherwise it is an installed RB
+           bootloader and the ONB sits right behind it. */
         struct Im3Info first;
         if (im3_read(NORBOOT_OFF, &first, NULL) != 0)
             return -1;
