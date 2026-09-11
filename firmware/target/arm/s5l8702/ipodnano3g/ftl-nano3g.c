@@ -468,13 +468,37 @@ uint32_t ftl_dbg_verify[6]; /* write fails, verify fails, copy verify fails,
 uint32_t ftl_dbg_guard[2];  /* refused writes/erases, last refused pblock */
 
 /* Physical blocks the FTL must never program or erase on this device:
-   0 (boot image), 1..4 (VFL context ring) in the lower half of each die,
-   the last block (DEVICEINFOBBT) and anything outside the die. */
+   0 (boot image) and 1 (the VFL context block actually in use) in the
+   lower half of each die, the last block (DEVICEINFOBBT) and anything
+   outside the die. Physical 2..5 are ordinary FTL data (vBlocks 1 and 2:
+   the OF maps lBlocks 0x2AF and 0xF4 there on the MB245), so the VFL's
+   "vflcxtblocks = 1 2 3 4" list cannot be physical block numbers beyond
+   the first entry; see ftl_vfl_commit_cxt. */
 static uint32_t ftl_nano3g_phys_reserved(uint32_t physblock)
 {
     if (physblock <= 4) return 1;
     if (physblock >= phys_blocks - 1) return 1;
     return 0;
+}
+
+/* nano 3G VFL: physical blocks 1..4 (lower half of each die) are the VFL
+   context ring, so the FTL data that the interleave would put into 2..4
+   (lower halves of vBlocks 1 and 2) lives in the first spare blocks right
+   after the FTL range instead. Verified on an MB245 on both dies:
+   2 -> 3920, 3 -> 3921, 4 -> 3922, with 3920 = 2 * (userblocks + 24).
+   ftl_nano3g_check_remap() confirms this against the flash at mount time
+   and writes are refused if it does not hold. */
+uint32_t ftl_nano3g_remap_ok;        /* 1 after a successful check */
+uint32_t ftl_nano3g_remap_info[6];   /* per substitute: lpn of page 0 (or ~0) on die 0/1 */
+static uint32_t ftl_nano3g_spare_base(void)
+{
+    return 2 * ((uint32_t)ftl_nand_type->userblocks + 24);
+}
+static uint32_t ftl_nano3g_phys_map(uint32_t physblock)
+{
+    if (physblock >= 2 && physblock <= 4)
+        return ftl_nano3g_spare_base() + (physblock - 2);
+    return physblock;
 }
 
 #endif
@@ -678,6 +702,13 @@ static uint32_t ftl_vfl_commit_cxt(uint32_t bank)
         if (ftl_vfl_store_cxt(bank) == 0) return 0;
     uint32_t current = ftl_vfl_cxt[bank].activecxtblock;
     uint32_t i = current, j;
+    /* nano 3G: the ring slots after the active one are NOT physical block
+       numbers we understand (physical 2..4 carry FTL user data), so never
+       rotate; 128 pages = 16 commits per slot, the MB245 has used 8. */
+    ftl_dbg_guard[0]++;
+    ftl_dbg_guard[1] = 0xFFFF0000 | bank;
+    DEBUGF("FTL: VFL: context block full on bank %u, rotation refused\n", (unsigned)bank);
+    return 1;
     while (1)
     {
         i = (i + 1) & 3;
@@ -932,8 +963,8 @@ static uint32_t ftl_vfl_read(uint32_t vpage, void* buffer, void* sparebuffer,
     uint32_t block = abspage / ppb;
     uint32_t page = (abspage / NANO3G_VBANKS) % ftl_nand_type->pagesperblock;
     uint32_t bank = vbank & 1;
-    uint32_t physblock = 2 * block + ((vbank >> 1) & 1)
-                       + ((vbank >> 2) & 1) * (phys_blocks / 2);
+    uint32_t physblock = ftl_nano3g_phys_map(2 * block + ((vbank >> 1) & 1)
+                       + ((vbank >> 2) & 1) * (phys_blocks / 2));
     uint32_t physpage = physblock * ftl_nand_type->pagesperblock + page;
 
     uint32_t ret = nand_read_page(bank, physpage, buffer,
@@ -1056,8 +1087,8 @@ static uint32_t ftl_vfl_write(uint32_t vpage, uint32_t count,
         uint32_t block = abspage / ppb;
         uint32_t page = (abspage / NANO3G_VBANKS) % ftl_nand_type->pagesperblock;
         uint32_t bank = vbank & 1;
-        uint32_t physblock = 2 * block + ((vbank >> 1) & 1)
-                           + ((vbank >> 2) & 1) * (phys_blocks / 2);
+        uint32_t physblock = ftl_nano3g_phys_map(2 * block + ((vbank >> 1) & 1)
+                           + ((vbank >> 2) & 1) * (phys_blocks / 2));
         uint32_t physpage = physblock * ftl_nand_type->pagesperblock + page;
 
         void* data = (void*)((uintptr_t)buffer + 0x800 * i);
@@ -1211,6 +1242,42 @@ static uint32_t ftl_vfl_open(void)
     return 0;
 }
 
+
+#ifndef FTL_READONLY
+/* Confirms the reserved-block substitution against the flash: physical
+   2..4 must be empty on every die, and page 0 of each substitute must be
+   empty or carry a page of the lBlock that ftl_map assigns to vBlock 1
+   (substitutes of 2 and 3) or vBlock 2 (substitute of 4). */
+static void ftl_nano3g_check_remap(void)
+{
+    uint32_t p, bank, ok = 1;
+    uint32_t owner[2] = { 0xFFFF, 0xFFFF };   /* lBlock of vBlock 1 and 2 */
+    for (p = 0; p < ftl_nand_type->userblocks; p++)
+    {
+        if (ftl_map[p] == 1) owner[0] = p;
+        if (ftl_map[p] == 2) owner[1] = p;
+    }
+    for (p = 2; p <= 4; p++)
+        for (bank = 0; bank < ftl_banks; bank++)
+        {
+            uint32_t ret = nand_read_page(bank, p * ftl_nand_type->pagesperblock,
+                                          ftl_verifybuf, &ftl_verifyspare, 1, 1);
+            if (!(ret & 2)) ok = 0;                 /* reserved block not empty */
+            uint32_t sub = ftl_nano3g_phys_map(p);
+            ret = nand_read_page(bank, sub * ftl_nand_type->pagesperblock,
+                                 ftl_verifybuf, &ftl_verifyspare, 1, 1);
+            uint32_t lpn = (ret & 2) ? 0xFFFFFFFF : ftl_verifyspare.user.lpn;
+            if (bank < 2) ftl_nano3g_remap_info[(p - 2) * 2 + bank] = lpn;
+            if (ret & 0x11D) { ok = 0; continue; }
+            if (ret & 2) continue;                  /* substitute unused */
+            if (ftl_verifyspare.user.type != 0x40 && ftl_verifyspare.user.type != 0x41) { ok = 0; continue; }
+            uint32_t want = owner[p == 4 ? 1 : 0];
+            if (want == 0xFFFF || lpn / ppb != want) ok = 0;
+        }
+    ftl_nano3g_remap_ok = ok;
+    DEBUGF("FTL: reserved-block substitution check: %s\n", ok ? "ok" : "FAILED");
+}
+#endif
 
 /* Mounts the actual FTL */
 #if defined(FTL_NANO3G_RESTORE) && !defined(FTL_READONLY)
@@ -1645,6 +1712,10 @@ static uint32_t ftl_open(void)
 #endif
 #endif
 
+#ifndef FTL_READONLY
+    ftl_nano3g_check_remap();
+#endif
+
 #ifdef FTL_DEBUG
     uint32_t j, k;
     for (i = 0; i < ftl_banks; i++)
@@ -1796,8 +1867,8 @@ static uint32_t ftl_erase_block_internal(uint32_t block)
     for (vbank = 0; vbank < NANO3G_VBANKS; vbank++)
     {
         uint32_t bank = vbank & 1;
-        uint32_t pblock = 2 * block + ((vbank >> 1) & 1)
-                        + ((vbank >> 2) & 1) * (phys_blocks / 2);
+        uint32_t pblock = ftl_nano3g_phys_map(2 * block + ((vbank >> 1) & 1)
+                        + ((vbank >> 2) & 1) * (phys_blocks / 2));
         uint32_t rc = 1;
         if (ftl_nano3g_phys_reserved(pblock))
         {
@@ -2412,6 +2483,11 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
     }
     if (count == 0) return 0;
 
+    if (!ftl_nano3g_remap_ok)
+    {
+        DEBUGF("FTL: reserved-block substitution unverified, refusing to write\n");
+        return -10;
+    }
     /* nano 3G: spare-block remapping is not applied by ftl_vfl_read/write,
        so a device with remapped blocks must stay read-only. */
     for (i = 0; i < ftl_banks; i++)
@@ -2729,6 +2805,8 @@ void ftl_nano3g_space_probe(uint32_t *out)
     out[0] = mn; out[1] = mx; out[2] = l1; out[3] = l2; out[4] = pmn; out[5] = pmx;
     out[6] = ftl_cxt.ftlctrlblocks[0]; out[7] = ftl_cxt.ftlctrlblocks[1]; out[8] = ftl_cxt.ftlctrlblocks[2];
     out[9] = above; out[10] = ftl_cxt.freecount; out[11] = ftl_dbg_guard[0]; out[12] = l1959; out[13] = hi;
+    out[14] = ftl_nano3g_remap_ok;
+    out[15] = ftl_nano3g_remap_info[0]; out[16] = ftl_nano3g_remap_info[2]; out[17] = ftl_nano3g_remap_info[4];
 }
 
 void ftl_nano3g_vfl_dump(uint32_t bank, uint32_t *out)

@@ -1431,6 +1431,163 @@ end:
     while (button_status() != BUTTON_SELECT) sleep(HZ/100);
 }
 
+
+/* Read-only: what is in the lowest physical blocks of each die (boot image,
+   VFL context, and the FTL's vBlocks 1..2 which the OF maps to lBlocks
+   0x2AF / 0xF4) and in the same blocks of the upper half. Prints page 0 and
+   page 127: spare word 0 (lpn or usn), word 2 low byte (type). */
+static void low_blocks_probe(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("Low blocks probe (read-only): ce/pblk: pg0 lpn/type, pg127 lpn/type");
+    uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+    nand3g_reset(0, 1);
+    const uint32_t blocks[] = { 0, 1, 2, 3, 4, 5, 6, 4096, 4097, 4098, 4099 };
+    for (int ce = 0; ce < 2; ce++) {
+        for (unsigned i = 0; i < ARRAYLEN(blocks); i++) {
+            uint32_t b = blocks[i];
+            int r0 = nand3g_read_page(NAND3G_CTRL, ce, b * 128, buf, sp, &raw);
+            uint32_t l0 = sp[0], t0 = (sp[2] >> 8) & 0xFF;
+            int r1 = nand3g_read_page(NAND3G_CTRL, ce, b * 128 + 127, buf, sp, &raw);
+            printf("%d/%4lu: %d %08lx %02lx | %d %08lx %02lx", ce, (unsigned long)b,
+                   r0, (unsigned long)l0, (unsigned long)t0, r1, (unsigned long)sp[0],
+                   (unsigned long)((sp[2] >> 8) & 0xFF));
+        }
+    }
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+
+/* Read-only: physical blocks 2..4 of each die are erased although the FTL
+   layout puts the lower halves of vBlocks 1 and 2 there. Scan page 0 of
+   every block on both dies for the logical pages that should live there
+   (lBlock 0x2AF pages 0/2 -> vBlock 1 planes 0/1, lBlock 0xF4 page 0 ->
+   vBlock 2 plane 0; die 1 holds the odd pages) and print where they are. */
+static void find_displaced_probe(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("Find displaced pages (read-only), scanning page 0 of all blocks");
+    uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+    nand3g_reset(0, 1);
+    const uint32_t want[2][3] = { { 0xABC00, 0xABC02, 0x3D000 }, { 0xABC01, 0xABC03, 0x3D001 } };
+    for (int ce = 0; ce < 2; ce++) {
+        int hits = 0;
+        for (uint32_t b = 0; b < 8192 && hits < 6; b++) {
+            int r = nand3g_read_page(NAND3G_CTRL, ce, b * 128, buf, sp, &raw);
+            if (r < 0 || r == NAND3G_ECC_UNCORRECTABLE) continue;
+            for (int k = 0; k < 3; k++)
+                if (sp[0] == want[ce][k]) {
+                    uint32_t sp2[3];
+                    nand3g_read_page(NAND3G_CTRL, ce, b * 128 + 127, buf, sp2, &raw);
+                    printf("ce%d lpn %05lx at pblk %lu (page127 lpn %08lx type %02lx usn %08lx)", ce,
+                           (unsigned long)want[ce][k], (unsigned long)b, (unsigned long)sp2[0],
+                           (unsigned long)((sp2[2] >> 8) & 0xFF), (unsigned long)sp[1]);
+                    hits++;
+                }
+        }
+        if (!hits) printf("ce%d: none of the three found", ce);
+    }
+    /* and what the VFL context says in its 0x20.. region: first 16 halfwords */
+    {
+        int r = nand3g_read_page(NAND3G_CTRL, 0, 1 * 128 + 63, buf, sp, &raw);
+        uint16_t *h = (uint16_t *)(buf + 0x20);
+        printf("VFL cxt (die0 blk1 pg63 rc %d) +0x20: %04x %04x %04x %04x %04x %04x %04x %04x", r,
+               h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        printf(" +0x30: %04x %04x %04x %04x %04x %04x %04x %04x", h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]);
+        h = (uint16_t *)(buf + 0x10);
+        printf(" +0x10: %04x %04x %04x %04x %04x %04x %04x %04x", h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        h = (uint16_t *)(buf + 0x694);
+        printf(" +0x694: %04x %04x %04x %04x %04x %04x %04x %04x", h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+    }
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+
+/* Read-only: decode the VFL remapping. Dumps every halfword of the newest
+   VFL context page (block 1, last written copy) that is neither 0xFFFF nor
+   0xFFF0 in the 0x000..0x6A0 region, locates lBlock 0x722 (whose upper
+   half sits in physical 4096/4097 = "vBlock 0"), and lists the bad blocks
+   from each die's DEVICEINFOBBT. */
+static void vfl_remap_probe(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("VFL remap probe (read-only)");
+    uint8_t *buf = nand3g_page_buffer(); uint32_t sp[3]; uint32_t raw;
+    nand3g_hw_init(0);
+    nand3g_reset(0, 0);
+    nand3g_reset(0, 1);
+    for (int ce = 0; ce < 2; ce++) {
+        /* newest cxt copy: highest page in block 1 with type 0x80 */
+        int found = -1;
+        for (int pg = 127; pg >= 0 && found < 0; pg--) {
+            int r = nand3g_read_page(NAND3G_CTRL, ce, 128 + pg, buf, sp, &raw);
+            if (r >= 0 && r != NAND3G_ECC_UNCORRECTABLE && ((sp[2] >> 8) & 0xFF) == 0x80) found = pg;
+        }
+        if (found < 0) { printf("ce%d: no VFL cxt page in block 1", ce); continue; }
+        char s[70]; int n = 0, shown = 0;
+        n = snprintf(s, sizeof(s), "ce%d pg%d:", ce, found);
+        uint16_t *h = (uint16_t *)buf;
+        for (int i = 0; i < 0x6A0 / 2 && shown < 40; i++) {
+            if (h[i] == 0xFFFF || h[i] == 0xFFF0) continue;
+            int k = snprintf(s + n, sizeof(s) - n, " %x=%x", i * 2, h[i]);
+            if (n + k >= 60) { printf("%s", s); n = 0; s[0] = 0; k = snprintf(s, sizeof(s), " %x=%x", i * 2, h[i]); }
+            n += k; shown++;
+        }
+        if (n) printf("%s", s);
+        printf(" +0x694: %04x %04x %04x %04x sched %04x", h[0x694/2], h[0x696/2], h[0x698/2], h[0x69a/2], h[0x69c/2]);
+        /* bad blocks per die */
+        int bbt = -1;
+        for (int b = 8191; b >= 7373 && bbt < 0; b--)
+            for (int pg = 0; pg < 128; pg++) {
+                int r = nand3g_read_page(NAND3G_CTRL, ce, b * 128 + pg, buf, sp, &raw);
+                if (r < 0 || r == NAND3G_ECC_UNCORRECTABLE) { if (pg > 2) break; continue; }
+                if (memcmp(buf, "DEVICEINFOBBT\0\0\0", 0x10) == 0) { bbt = b * 128 + pg; break; }
+            }
+        if (bbt >= 0) {
+            uint32_t len = *(uint32_t *)&buf[0x34]; if (len > 0x400) len = 0x400;
+            n = snprintf(s, sizeof(s), " bad blocks (BBT pg %d):", bbt);
+            int nb = 0;
+            for (uint32_t b = 0; b < len * 8 && b < 8192; b++)
+                if (!((buf[0x38 + (b >> 3)] >> (b & 7)) & 1)) {
+                    if (nb < 10) n += snprintf(s + n, sizeof(s) - n, " %lu", (unsigned long)b);
+                    nb++;
+                }
+            printf("%s (total %d)", s, nb);
+        } else printf(" BBT not found");
+    }
+    /* where is lBlock 0x722's lower half? lpn 0x1C8800 (die 0 plane 0) */
+    for (int ce = 0; ce < 2; ce++) {
+        uint32_t want = 0x1C8800 + ce;
+        int hits = 0;
+        for (uint32_t b = 0; b < 8192 && hits < 2; b++) {
+            int r = nand3g_read_page(NAND3G_CTRL, ce, b * 128, buf, sp, &raw);
+            if (r < 0 || r == NAND3G_ECC_UNCORRECTABLE) continue;
+            if (sp[0] == want || sp[0] == want + 2) {
+                printf("ce%d lpn %05lx at pblk %lu (usn %08lx)", ce, (unsigned long)sp[0], (unsigned long)b, (unsigned long)sp[1]);
+                hits++;
+            }
+        }
+        if (!hits) printf("ce%d: lpn %05lx/+2 not found in any page 0", ce, (unsigned long)want);
+    }
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
 static volatile uint32_t dma_test_cbs;
@@ -1866,7 +2023,9 @@ static void ftl_mount_test(void)
         rc = ftl_read(0, 1, sec);
         {
             extern void ftl_nano3g_space_probe(uint32_t *out);
-            uint32_t o[14]; ftl_nano3g_space_probe(o);
+            uint32_t o[18]; ftl_nano3g_space_probe(o);
+            printf("remap check %s: 3920/1/2 pg0 lpn %lx %lx %lx", o[14] ? "OK" : "FAILED",
+                   (unsigned long)o[15], (unsigned long)o[16], (unsigned long)o[17]);
             printf("space: map %lu..%lu pool %lu..%lu ctrl %lu %lu %lu hi %lu",
                    (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[4], (unsigned long)o[5],
                    (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[13]);
@@ -1919,6 +2078,9 @@ static void devel_menu(void)
 #ifdef IPOD_NANO3G
         "Mark unclean in current ctrl block (no restore)",
         "VFL state dump (read-only)",
+        "Low blocks probe (read-only)",
+        "Find displaced pages (read-only)",
+        "VFL remap probe (read-only)",
         "Erase vblock 631 (garbage copy of lblock 0)",
         "FTL recover: force restore + mark unclean (0x4F)",
         "FTL write test 2: write + ftl_sync + write (dirty)",
@@ -1958,6 +2120,9 @@ static void devel_menu(void)
 #ifdef IPOD_NANO3G
         mark_unclean_inplace,
         vfl_dump,
+        low_blocks_probe,
+        find_displaced_probe,
+        vfl_remap_probe,
         erase_631,
         ftl_recover,
         ftl_wtest2,
