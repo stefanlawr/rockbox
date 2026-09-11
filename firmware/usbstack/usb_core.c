@@ -399,14 +399,15 @@ static void set_serial_descriptor(void)
         device_descriptor.iSerialNumber = 0;
         return;
     }
-    short* p = &usb_string_iSerial.wString[0];
+    /* wString[0] is reserved for the interface-set character, see above */
+    short* p = &usb_string_iSerial.wString[1];
     int len = 0;
     while (len < 16 && serial[len] >= 0x20 && serial[len] < 0x7F)
     {
         *p++ = serial[len];
         len++;
     }
-    usb_string_iSerial.bLength = 2 + len * 2;
+    usb_string_iSerial.bLength = 2 + (len + 1) * 2;
 }
 
 #elif (CONFIG_STORAGE & STORAGE_ATA)
