@@ -43,6 +43,9 @@
    log entries and the free pool from the spare data (openiBoot's
    FTL_Restore), exactly as the OF does on such a mount. */
 #define FTL_NANO3G_RESTORE
+/* nano 3G bring-up: after every sync leave a 0x47 dirty mark above the new
+   context (see ftl_sync). */
+#define FTL_NANO3G_DIRTY_AFTER_SYNC
 
 
 #ifdef FTL_READONLY
@@ -452,6 +455,27 @@ static union ftl_spare_data_type ftl_copyspare[FTL_COPYBUF_SIZE] STORAGE_ALIGN_A
 /* Needed to store the old scattered page offsets in order to be able to roll
    back if something fails while compacting a scattered page block. */
 static uint16_t ftl_offsets_backup[0x400] STORAGE_ALIGN_ATTR;
+
+/* nano 3G: every page write is read back and compared (data + the three
+   metadata words) before it counts as done, and every block copy is
+   verified page by page before the block map is switched. These buffers
+   must not alias the caller's buffers (ftl_buffer/ftl_sparebuffer are
+   passed in by the context writers). */
+static uint8_t ftl_verifybuf[0x800] STORAGE_ALIGN_ATTR;
+static union ftl_spare_data_type ftl_verifyspare STORAGE_ALIGN_ATTR;
+uint32_t ftl_dbg_verify[6]; /* write fails, verify fails, copy verify fails,
+                               pages verified, last bad vpage, last bad bank */
+uint32_t ftl_dbg_guard[2];  /* refused writes/erases, last refused pblock */
+
+/* Physical blocks the FTL must never program or erase on this device:
+   0 (boot image), 1..4 (VFL context ring) in the lower half of each die,
+   the last block (DEVICEINFOBBT) and anything outside the die. */
+static uint32_t ftl_nano3g_phys_reserved(uint32_t physblock)
+{
+    if (physblock <= 4) return 1;
+    if (physblock >= phys_blocks - 1) return 1;
+    return 0;
+}
 
 #endif
 
@@ -964,8 +988,8 @@ static uint32_t ftl_vfl_read_fast(uint32_t vpage, void* buffer, void* sparebuffe
         {
             void* databuf = NULL;
             void* sparebuf = NULL;
-            if (buffer) databuf = (void*)((uint32_t)buffer + 0x800 * i);
-            if (sparebuffer) sparebuf = (void*)((uint32_t)sparebuffer + 0x40 * i);
+            if (buffer) databuf = (void*)((uintptr_t)buffer + 0x800 * i);
+            if (sparebuffer) sparebuf = (void*)((uintptr_t)sparebuffer + 0x40 * i);
             uint32_t ret = ftl_vfl_read(vpage + i, databuf, sparebuf, checkempty, remaponfail);
             if (ret & 1) rc |= 1 << (i << 2);
             if (ret & 2) rc |= 2 << (i << 2);
@@ -987,8 +1011,8 @@ static uint32_t ftl_vfl_read_fast(uint32_t vpage, void* buffer, void* sparebuffe
             rc &= ~(0xf << (i << 2));
             nand_reset(i);
             uint32_t ret = nand_read_page(i, physpage,
-                                          (void*)((uint32_t)buffer + 0x800 * i),
-                                          (void*)((uint32_t)sparebuffer + 0x40 * i),
+                                          (void*)((uintptr_t)buffer + 0x800 * i),
+                                          (void*)((uintptr_t)sparebuffer + 0x40 * i),
                                           1, checkempty);
 #ifdef FTL_READONLY
             (void)remaponfail;
@@ -1036,16 +1060,45 @@ static uint32_t ftl_vfl_write(uint32_t vpage, uint32_t count,
                            + ((vbank >> 2) & 1) * (phys_blocks / 2);
         uint32_t physpage = physblock * ftl_nand_type->pagesperblock + page;
 
-        if (nand_write_page(bank, physpage,
-                            (void*)((uint32_t)buffer + 0x800 * i),
-                            (void*)((uint32_t)sparebuffer + 0x40 * i), 1))
-            if (nand_read_page(bank, physpage, ftl_buffer,
-                               &ftl_sparebuffer[0], 1, 1) & 0x11F)
+        void* data = (void*)((uintptr_t)buffer + 0x800 * i);
+        void* spare = (void*)((uintptr_t)sparebuffer + 0x40 * i);
+        uint32_t bad = 0;
+        if (ftl_nano3g_phys_reserved(physblock))
+        {
+            ftl_dbg_guard[0]++;
+            ftl_dbg_guard[1] = physblock | (bank << 16);
+            DEBUGF("FTL: refusing to program reserved pBlock %u\n", (unsigned)physblock);
+            return 1;
+        }
+        if (nand_write_page(bank, physpage, data, spare, 1))
+        {
+            ftl_dbg_verify[0]++;
+            bad = 1;
+        }
+        else
+        {
+            /* Read back and compare: data and the metadata words the
+               controller stores (lpn/usn, usn/idx, type/eccmark). */
+            uint32_t ret = nand_read_page(bank, physpage, ftl_verifybuf,
+                                          &ftl_verifyspare, 1, 0);
+            if ((ret & 0x11F) != 0
+             || memcmp(ftl_verifybuf, data, 0x800) != 0
+             || memcmp(&ftl_verifyspare, spare, 12) != 0)
             {
-                panicf("FTL: write error on vPage %u, bank %u, pPage %u",
-                       (unsigned)(vpage + i), (unsigned)bank, (unsigned)physpage);
-                ftl_vfl_log_trouble(bank, block);
+                ftl_dbg_verify[1]++;
+                bad = 1;
             }
+            else ftl_dbg_verify[3]++;
+        }
+        if (bad)
+        {
+            ftl_dbg_verify[4] = vpage + i;
+            ftl_dbg_verify[5] = bank | (physpage << 8);
+            DEBUGF("FTL: write/verify error on vPage %u, bank %u, pPage %u\n",
+                   (unsigned)(vpage + i), (unsigned)bank, (unsigned)physpage);
+            ftl_vfl_log_trouble(bank, block);
+            return 1;
+        }
     }
 
     return 0;
@@ -1174,6 +1227,7 @@ uint32_t ftl_restore_diff[8];
 static uint16_t rst_blockmap[0x800];
 static uint8_t  rst_isempty[0x800];
 static uint8_t  rst_nonseq[0x800];
+static uint8_t  rst_consumed[0x800]; /* taken as map or log block */
 static uint32_t rst_usnA[0x400], rst_usnB[0x400];
 static uint32_t rst_lpnA[0x400], rst_lpnB[0x400];
 
@@ -1235,12 +1289,13 @@ static uint32_t ftl_restore(void)
 
     /* Step 1: which vBlock holds pages of which lBlock */
     for (block = 0; block < FTL_FIRST_VBLOCK; block++)
-    { rst_blockmap[block] = 0; rst_isempty[block] = 0; rst_nonseq[block] = 0; }
+    { rst_blockmap[block] = 0xFFFF; rst_isempty[block] = 0; rst_nonseq[block] = 0; rst_consumed[block] = 1; }
     for (block = FTL_FIRST_VBLOCK; block < nblocks; block++)
     {
         rst_blockmap[block] = 0xFFFF;
         rst_isempty[block] = 1;
         rst_nonseq[block] = 0;
+        rst_consumed[block] = 0;
         uint32_t page;
         for (page = 0; page < ppb; page++)
         {
@@ -1277,7 +1332,7 @@ static uint32_t ftl_restore(void)
         for (cand = FTL_FIRST_VBLOCK; cand < nblocks; cand++)
         {
             uint32_t candusn;
-            if (rst_blockmap[cand] != block) continue;
+            if (rst_consumed[cand] || rst_blockmap[cand] != block) continue;
 
             if (rst_nonseq[cand])
             {
@@ -1328,21 +1383,21 @@ static uint32_t ftl_restore(void)
 
         if (ftl_map[block] != mapc) { if (mapdiff < 3) ftl_restore_mapdiff[mapdiff] = block | (ftl_map[block] << 12) | (mapc << 22); mapdiff++; }
         ftl_map[block] = mapc;
-        rst_blockmap[mapc] = 0;
+        rst_consumed[mapc] = 1;
         if (logc != 0xFFFF)
         {
             if (numlogs >= 0x11) { ftl_restore_stats[0] = 3; return 1; }
             ftl_log[numlogs].logicalvblock = block;
             ftl_log[numlogs].scatteredvblock = logc;
             numlogs++;
-            rst_blockmap[logc] = 0;
+            rst_consumed[logc] = 1;
         }
     }
 
     /* Step 3: everything else that is not a control block is a free block */
     for (block = FTL_FIRST_VBLOCK; block < nblocks; block++)
     {
-        if (rst_blockmap[block] == 0) continue;
+        if (rst_consumed[block]) continue;
         for (i = 0; i < 3; i++) if (block == ftl_cxt.ftlctrlblocks[i]) break;
         if (i < 3) continue;
         if (ftl_cxt.freecount < 4) ftl_restore_dbg[4 + ftl_cxt.freecount] = block;
@@ -1744,6 +1799,13 @@ static uint32_t ftl_erase_block_internal(uint32_t block)
         uint32_t pblock = 2 * block + ((vbank >> 1) & 1)
                         + ((vbank >> 2) & 1) * (phys_blocks / 2);
         uint32_t rc = 1;
+        if (ftl_nano3g_phys_reserved(pblock))
+        {
+            ftl_dbg_guard[0]++;
+            ftl_dbg_guard[1] = pblock | (bank << 16);
+            DEBUGF("FTL: refusing to erase reserved pBlock %u\n", (unsigned)pblock);
+            return 1;
+        }
         for (j = 0; j < 3; j++)
         {
             rc = nand_block_erase(bank, pblock * ftl_nand_type->pagesperblock);
@@ -1751,7 +1813,7 @@ static uint32_t ftl_erase_block_internal(uint32_t block)
         }
         if (rc != 0)
         {
-            panicf("FTL: Block erase failed on bank %u block %u (pblock %u)",
+            DEBUGF("FTL: Block erase failed on bank %u block %u (pblock %u)\n",
                    (unsigned)bank, (unsigned)block, (unsigned)pblock);
             return 1;
         }
@@ -1774,6 +1836,7 @@ static uint32_t ftl_erase_block(uint32_t block)
 
 
 #ifndef FTL_READONLY
+static uint32_t ftl_vblock_is_empty(uint32_t block);
 /* Allocates a block from the pool,
    returning its vBlock number, or 0xFFFFFFFF on error */
 static uint32_t ftl_allocate_pool_block(void)
@@ -1800,7 +1863,11 @@ static uint32_t ftl_allocate_pool_block(void)
     }
     if (block > (uint32_t)ftl_nand_type->userblocks + 0x17)
         panicf("FTL: Bad block number in pool: %u", (unsigned)block);
-    if (ftl_erase_block(block) != 0) return 0xFFFFFFFF;
+    /* nano 3G: pool blocks are erased when released (see
+       ftl_release_pool_block), so only erase here if the block is not
+       empty (first and last page), e.g. after a restore. */
+    if (!ftl_vblock_is_empty(block))
+        if (ftl_erase_block(block) != 0) return 0xFFFFFFFF;
     if (++ftl_cxt.nextfreeidx == 0x14) ftl_cxt.nextfreeidx = 0;
     ftl_cxt.freecount--;
     return block;
@@ -1810,10 +1877,21 @@ static uint32_t ftl_allocate_pool_block(void)
 
 #ifndef FTL_READONLY
 /* Releases a vBlock back into the pool */
+static uint32_t ftl_vblock_is_empty(uint32_t block)
+{
+    uint32_t r0 = ftl_vfl_read(block * ppb, ftl_verifybuf, &ftl_verifyspare, 1, 0);
+    uint32_t r1 = ftl_vfl_read(block * ppb + ppb - 1, ftl_verifybuf, &ftl_verifyspare, 1, 0);
+    return (r0 & 2) && (r1 & 2);
+}
+
 static void ftl_release_pool_block(uint32_t block)
 {
     if (block >= (uint32_t)ftl_nand_type->userblocks + 0x17)
         panicf("FTL: Tried to release block %u", (unsigned)block);
+    /* nano 3G: keep the free pool erased. A failed erase is not fatal
+       here: the allocator erases again before use. */
+    if (!ftl_vblock_is_empty(block))
+        ftl_erase_block(block);
     uint32_t idx = ftl_cxt.nextfreeidx + ftl_cxt.freecount++;
     if (idx >= 0x14) idx -= 0x14;
     ftl_cxt.blockpool[idx] = block;
@@ -1950,8 +2028,40 @@ static uint32_t ftl_copy_block(uint32_t source, uint32_t destination)
             break;
         }
     }
+    /* Second pass: every page of the copy must read back clean, carry the
+       expected lpn/type, and match a fresh read of the logical page. */
+    if (error == 0)
+        for (i = 0; i < ppb; i++)
+        {
+            uint32_t ret = ftl_vfl_read(destination * ppb + i, ftl_verifybuf,
+                                        &ftl_verifyspare, 1, 0) & 0x11F;
+            uint32_t want_type = (i == ppb - 1) ? 0x41 : 0x40;
+            if (ret != 0
+             || ftl_verifyspare.user.lpn != source * ppb + i
+             || ftl_verifyspare.user.type != want_type
+             || ftl_verifyspare.user.usn != ftl_cxt.nextblockusn)
+            {
+                error = 2;
+                break;
+            }
+            if (ftl_verifyspare.user.eccmark == 0xFF)
+            {
+                /* the source read failed earlier if eccmark is 0x55 */
+                ftl_read(source * ppb + i, 1, ftl_copybuffer[0]);
+                if (memcmp(ftl_copybuffer[0], ftl_verifybuf, 0x800) != 0)
+                {
+                    error = 3;
+                    break;
+                }
+            }
+        }
     if (error != 0)
     {
+        if (error >= 2)
+        {
+            ftl_dbg_verify[2]++;
+            ftl_dbg_verify[4] = destination * ppb + i;
+        }
         ftl_erase_block(destination);
         return 1;
     }
@@ -1991,7 +2101,7 @@ static uint32_t ftl_compact_scattered(struct ftl_log_type* entry)
         return 0;
     }
     backup = *entry;
-    memcpy(ftl_offsets_backup, entry->pageoffsets, 0x400);
+    memcpy(ftl_offsets_backup, entry->pageoffsets, ppb * sizeof(uint16_t));
     for (i = 0; i < 4; i++)
     {
         uint32_t block = ftl_allocate_pool_block();
@@ -2025,7 +2135,7 @@ static uint32_t ftl_compact_scattered(struct ftl_log_type* entry)
             break;
         }
         *entry = backup;
-        memcpy(entry->pageoffsets, ftl_offsets_backup, 0x400);
+        memcpy(entry->pageoffsets, ftl_offsets_backup, ppb * sizeof(uint16_t));
     }
     return error;
 }
@@ -2147,7 +2257,7 @@ static void ftl_init_log_entry(struct ftl_log_type* entry)
     entry->issequential = 1;
     entry->pagescurrent = 0;
     entry->pagesused = 0;
-    memset(entry->pageoffsets, 0xFF, 0x400);
+    memset(entry->pageoffsets, 0xFF, ppb * sizeof(uint16_t));
 }
 #endif
 
@@ -2255,7 +2365,7 @@ static uint32_t ftl_swap_blocks(void)
         {
             maxidx = idx;
             maxvb = ftl_cxt.blockpool[idx];
-            max = ftl_erasectr[maxidx];
+            max = ftl_erasectr[maxvb];
         }
     }
     if (maxidx == 0x14) return 0;
@@ -2267,15 +2377,19 @@ static uint32_t ftl_swap_blocks(void)
         {
             minidx = i;
             minvb = ftl_map[i];
-            min = ftl_erasectr[minidx];
+            min = ftl_erasectr[minvb];
         }
     }
     if (max - min < 5) return 0;
     if (minvb == maxvb) return 0;
-    if (ftl_erase_block(maxvb) != 0) return 1;
+    if (!ftl_vblock_is_empty(maxvb))
+        if (ftl_erase_block(maxvb) != 0) return 1;
     if (ftl_copy_block(minidx, maxvb) != 0) return 1;
-    ftl_cxt.blockpool[maxidx] = minvb;
     ftl_map[minidx] = maxvb;
+    /* the old data block goes back to the pool erased */
+    if (!ftl_vblock_is_empty(minvb))
+        ftl_erase_block(minvb);
+    ftl_cxt.blockpool[maxidx] = minvb;
     return 0;
 }
 #endif
@@ -2297,6 +2411,16 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
         return -2;
     }
     if (count == 0) return 0;
+
+    /* nano 3G: spare-block remapping is not applied by ftl_vfl_read/write,
+       so a device with remapped blocks must stay read-only. */
+    for (i = 0; i < ftl_banks; i++)
+        if (ftl_vfl_cxt[i].spareused != 0)
+        {
+            DEBUGF("FTL: bank %u has %u remapped blocks, refusing to write\n",
+                   (unsigned)i, (unsigned)ftl_vfl_cxt[i].spareused);
+            return -9;
+        }
 
     mutex_lock(&ftl_mtx);
 
@@ -2373,13 +2497,16 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
                                             &((uint8_t*)buffer)[(i + j) << 11],
                                             &ftl_sparebuffer[0]);
                 if (rc)
-                    for (k = 0; k < ftl_banks; k++)
-                        if (rc & (1 << k))
-                        {
-                            while (ftl_vfl_write(vblock * ppb + j + k, 1,
-                                                 &((uint8_t*)buffer)[(i + j + k) << 11],
-                                                 &ftl_sparebuffer[k]));
-                        }
+                {
+                    /* nano 3G: a retry in place would program the same
+                       physical page twice. Abandon the block instead; the
+                       old copy in ftl_map[block] is still intact. */
+                    (void)k;
+                    ftl_erase_block(vblock);
+                    ftl_release_pool_block(vblock);
+                    mutex_unlock(&ftl_mtx);
+                    return -8;
+                }
             }
             ftl_release_pool_block(ftl_map[block]);
             ftl_map[block] = vblock;
@@ -2496,6 +2623,22 @@ uint32_t ftl_sync(void)
         if (ftl_commit_cxt() == 0)
         {
             ftl_dbg_ctrl_update();
+#ifdef FTL_NANO3G_DIRTY_AFTER_SYNC
+            /* Bring-up safety net: mark the context dirty right away, in the
+               same control block, so that the next mount (ours or the OF's)
+               restores from the spare data and never trusts a context that
+               might be subtly wrong. Costs one page per sync. */
+            if (ftl_next_ctrl_pool_page() == 0)
+            {
+                memset(ftl_buffer, 0xFF, 0x800);
+                memset(&ftl_sparebuffer[0], 0xFF, 0x40);
+                ftl_sparebuffer[0].meta.usn = ftl_cxt.usn;
+                ftl_sparebuffer[0].meta.type = 0x47;
+                if (ftl_vfl_write(ftl_cxt.ftlctrlpage, 1, ftl_buffer,
+                                  &ftl_sparebuffer[0]) == 0)
+                    ftl_cxt.clean_flag = 0;
+            }
+#endif
             mutex_unlock(&ftl_mtx);
             return 0;
         }
@@ -2547,6 +2690,47 @@ uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t 
 }
 
 /* dev: VFL context summary for a bank into out[16] */
+/* dev: where does the OF's FTL space live? out[0] map min, [1] map max,
+   [2] lBlock mapped to vBlock 1 (0xFFFF none), [3] same for vBlock 2,
+   [4] pool min, [5] pool max, [6..8] ctrl blocks, [9] number of map
+   entries above userblocks+23, [10] freecount, [11] guard refusals,
+   [12] lBlock mapped to vBlock 1959, [13] highest vBlock seen anywhere. */
+void ftl_nano3g_space_probe(uint32_t *out)
+{
+    uint32_t i, mn = 0xFFFF, mx = 0, l1 = 0xFFFF, l2 = 0xFFFF, l1959 = 0xFFFF, above = 0, hi = 0;
+    for (i = 0; i < ftl_nand_type->userblocks; i++)
+    {
+        uint32_t v = ftl_map[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        if (v == 1) l1 = i;
+        if (v == 2) l2 = i;
+        if (v == 1959) l1959 = i;
+        if (v > (uint32_t)ftl_nand_type->userblocks + 23) above++;
+    }
+    hi = mx;
+    uint32_t pmn = 0xFFFF, pmx = 0;
+    for (i = 0; i < 0x14; i++)
+    {
+        uint32_t v = ftl_cxt.blockpool[i];
+        if (v == 0xFFFF) continue;
+        if (v < pmn) pmn = v;
+        if (v > pmx) pmx = v;
+        if (v == 1) l1 = 0xFFF1;
+        if (v == 2) l2 = 0xFFF2;
+    }
+    if (pmx > hi) hi = pmx;
+    for (i = 0; i < 3; i++)
+    {
+        if (ftl_cxt.ftlctrlblocks[i] == 1) l1 = 0xFFC1;
+        if (ftl_cxt.ftlctrlblocks[i] == 2) l2 = 0xFFC2;
+        if (ftl_cxt.ftlctrlblocks[i] > hi) hi = ftl_cxt.ftlctrlblocks[i];
+    }
+    out[0] = mn; out[1] = mx; out[2] = l1; out[3] = l2; out[4] = pmn; out[5] = pmx;
+    out[6] = ftl_cxt.ftlctrlblocks[0]; out[7] = ftl_cxt.ftlctrlblocks[1]; out[8] = ftl_cxt.ftlctrlblocks[2];
+    out[9] = above; out[10] = ftl_cxt.freecount; out[11] = ftl_dbg_guard[0]; out[12] = l1959; out[13] = hi;
+}
+
 void ftl_nano3g_vfl_dump(uint32_t bank, uint32_t *out)
 {
     struct ftl_vfl_cxt_type *c = &ftl_vfl_cxt[bank];

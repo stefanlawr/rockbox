@@ -1,0 +1,9 @@
+Host-side test harness for the iPod nano 3G FTL (ftl-nano3g.c).
+
+sim_nand.c implements the nand-target.h API on an in-memory two-die NAND
+that flags double programming and bad-block access; harness.c formats a
+simulated flash with the FTL's own context writers, then runs write, sync,
+wear-swap, unclean-remount (restore) and fault-injection scenarios against
+a reference model and checks the pool invariants after each step.
+
+Run: ./build.sh        (add -v for the FTL's DEBUGF output)
