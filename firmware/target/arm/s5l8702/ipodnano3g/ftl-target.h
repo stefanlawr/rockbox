@@ -24,11 +24,6 @@
 #include "config.h"
 #include "inttypes.h"
 
-#if defined(BOOTLOADER) && !defined(S5L87XX_DEVELOPMENT_BOOTLOADER)
-/* The standard bootloader only loads rockbox.ipod: keep it read-only.
-   The development bootloader carries the full FTL for its tests. */
-#define FTL_READONLY
-#endif
 
 /* Pointer to an info structure regarding the flash type used */
 extern const struct nand_device_info_type* ftl_nand_type;
