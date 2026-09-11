@@ -785,9 +785,16 @@ int nand_device_init(void)
  * Rockbox storage API, mirroring firmware/target/arm/s5l8700/ata-nand-s5l8700.c
  * ---------------------------------------------------------------------- */
 
+static bool ftl_mounted;
 int nand_init(void)
 {
+    /* Rockbox re-runs storage_init() when leaving USB mode. The FTL is
+       already mounted then and holds unsynced log state, so sync it rather
+       than mounting again from the (older) on-flash context. */
+    if (ftl_mounted)
+        return ftl_sync() ? 1 : 0;
     if (ftl_init()) return 1;
+    ftl_mounted = true;
     return 0;
 }
 
