@@ -2803,6 +2803,50 @@ uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t 
 }
 
 /* dev: VFL context summary for a bank into out[16] */
+#if !defined(BOOTLOADER)
+/* Memory watchdog for the context corruption hunt: with writes disabled
+   the FTL never touches ftl_cxt, ftl_map or the VFL contexts after the
+   mount, so any change seen by this tick task is corruption by someone
+   else. Records the first change (tick, region, offset, old/new word). */
+static uint8_t watch_cxt[sizeof(struct ftl_cxt_type)];
+static uint16_t watch_map[0x2000];
+static uint8_t watch_vfl[2][0x800];
+uint32_t ftl_watch[8];   /* armed, changes, first tick, region, offset, old, new, last tick */
+static void ftl_nano3g_watch_tick(void)
+{
+    if (!ftl_watch[0]) return;
+    const uint8_t *a[3] = { (const uint8_t*)&ftl_cxt, (const uint8_t*)ftl_map, (const uint8_t*)ftl_vfl_cxt };
+    const uint8_t *b[3] = { watch_cxt, (const uint8_t*)watch_map, (const uint8_t*)watch_vfl };
+    uint32_t n[3] = { sizeof(watch_cxt), sizeof(watch_map), sizeof(watch_vfl) };
+    for (int r = 0; r < 3; r++)
+    {
+        if (memcmp(a[r], b[r], n[r]) == 0) continue;
+        uint32_t off = 0;
+        while (off < n[r] && a[r][off] == b[r][off]) off++;
+        off &= ~3;
+        if (ftl_watch[1] == 0)
+        {
+            ftl_watch[2] = current_tick;
+            ftl_watch[3] = r;
+            ftl_watch[4] = off;
+            memcpy(&ftl_watch[5], b[r] + off, 4);
+            memcpy(&ftl_watch[6], a[r] + off, 4);
+        }
+        ftl_watch[1]++;
+        ftl_watch[7] = current_tick;
+        memcpy((void*)b[r], a[r], n[r]);   /* re-arm on the new content */
+    }
+}
+void ftl_nano3g_watch_arm(void)
+{
+    memcpy(watch_cxt, &ftl_cxt, sizeof(watch_cxt));
+    memcpy(watch_map, ftl_map, sizeof(watch_map));
+    memcpy(watch_vfl, ftl_vfl_cxt, sizeof(watch_vfl));
+    ftl_watch[1] = 0;
+    ftl_watch[0] = 1;
+}
+#endif
+
 /* debug screen: current FTL control state */
 void ftl_nano3g_state(uint32_t *out)
 {
@@ -2927,7 +2971,18 @@ uint32_t ftl_init(void)
     ftl_dbg[11] = ftl_banks | (syshyperblocks << 8);
     if (ftl_vfl_open() == 0)
         if (ftl_open() == 0)
+        {
+#if !defined(BOOTLOADER)
+            static bool watch_registered;
+            ftl_nano3g_watch_arm();
+            if (!watch_registered)
+            {
+                tick_add_task(ftl_nano3g_watch_tick);
+                watch_registered = true;
+            }
+#endif
             return 0;
+        }
 
     DEBUGF("FTL: Initialization failed!\n");
 
