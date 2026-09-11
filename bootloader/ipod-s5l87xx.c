@@ -1479,6 +1479,35 @@ static void ftl_mount_test(void)
            (unsigned long)ftl_dbg[1], (unsigned long)ftl_dbg[2],
            (unsigned long)ftl_dbg[3], (unsigned long)ftl_dbg[4],
            (unsigned long)ftl_dbg[5]);
+    {
+        extern uint32_t ftl_unclean, ftl_restore_stats[8];
+        printf("unclean %lu restore rc %lu logs %lu free %lu mapdiff %lu",
+               (unsigned long)ftl_unclean, (unsigned long)ftl_restore_stats[0],
+               (unsigned long)ftl_restore_stats[1], (unsigned long)ftl_restore_stats[2],
+               (unsigned long)ftl_restore_stats[3]);
+        {
+            extern uint32_t ftl_restore_dbg[8];
+            printf(" OF pool: free %lu idx %lu [%lx %lx %lx %lx .. %lx %lx]",
+                   (unsigned long)(ftl_restore_dbg[0] & 0xffff), (unsigned long)(ftl_restore_dbg[0] >> 16),
+                   (unsigned long)(ftl_restore_dbg[1] & 0xffff), (unsigned long)(ftl_restore_dbg[1] >> 16),
+                   (unsigned long)(ftl_restore_dbg[2] & 0xffff), (unsigned long)(ftl_restore_dbg[2] >> 16),
+                   (unsigned long)(ftl_restore_dbg[3] & 0xffff), (unsigned long)(ftl_restore_dbg[3] >> 16));
+            printf(" found free: %lx %lx %lx %lx .. overflow at %lx",
+                   (unsigned long)ftl_restore_dbg[4], (unsigned long)ftl_restore_dbg[5],
+                   (unsigned long)ftl_restore_dbg[6], (unsigned long)ftl_restore_dbg[7],
+                   (unsigned long)ftl_restore_stats[7]);
+        }
+        {
+            extern uint32_t ftl_restore_diff[8];
+            printf(" extra free (blk|map<<16|e<<12): %lx %lx %lx", (unsigned long)ftl_restore_diff[1],
+                   (unsigned long)ftl_restore_diff[2], (unsigned long)ftl_restore_diff[3]);
+            printf(" OF-pool not free: %lx %lx %lx", (unsigned long)ftl_restore_diff[4],
+                   (unsigned long)ftl_restore_diff[5], (unsigned long)ftl_restore_diff[6]);
+        }
+        printf(" highest usn %lu blocks %lu empty %lu writes %u erases %u",
+               (unsigned long)ftl_restore_stats[4], (unsigned long)ftl_restore_stats[5],
+               (unsigned long)ftl_restore_stats[6], nand3g_stat_writes, nand3g_stat_erases);
+    }
     printf(" %lx %lx %lx %lx %lx %lx", (unsigned long)ftl_dbg[6],
            (unsigned long)ftl_dbg[7], (unsigned long)ftl_dbg[8],
            (unsigned long)ftl_dbg[9], (unsigned long)ftl_dbg[10],

@@ -665,37 +665,64 @@ uint32_t nand_read_page_fast(uint32_t page, void* databuffer,
     return rc;
 }
 
-/* Read-only driver: every write/erase entry point fails loudly. */
+/* Write/erase glue for the FTL. Writes are gated by nand3g_write_enable so
+   that a build with write support can still be run without touching the
+   flash (restore-only mount tests). */
+int nand3g_write_enable = 0;
+unsigned nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors;
+
 uint32_t nand_write_page(uint32_t bank, uint32_t page, void* databuffer,
                          void* sparebuffer, uint32_t doecc)
 {
-    (void)bank; (void)page; (void)databuffer; (void)sparebuffer; (void)doecc;
-    return 1;
+    (void)doecc;
+    if (!nand3g_write_enable) return 1;
+    if (bank >= 4 || nand_type[bank] < 0) return 1;
+    uint32_t sp[NAND3G_SPARE_WORDS] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+    if (sparebuffer) memcpy(sp, sparebuffer, 12);
+    uint8_t *buf = nand3g_page_buffer();
+    if (databuffer) memcpy(buf, databuffer, NAND3G_PAGE_SIZE);
+    else memset(buf, 0xFF, NAND3G_PAGE_SIZE);
+    mutex_lock(&nand_mtx);
+    nand_last_activity_value = current_tick;
+    nand3g_stat_writes++;
+    int r = nand3g_write_page(NAND3G_CTRL, bank, page, buf, sp);
+    mutex_unlock(&nand_mtx);
+    if (r != 0) { nand3g_stat_write_errors++; return 1; }
+    return 0;
 }
 
 uint32_t nand_write_page_start(uint32_t bank, uint32_t page, void* databuffer,
                                void* sparebuffer, uint32_t doecc)
 {
-    (void)bank; (void)page; (void)databuffer; (void)sparebuffer; (void)doecc;
-    return 1;
+    return nand_write_page(bank, page, databuffer, sparebuffer, doecc);
 }
 
 uint32_t nand_write_page_collect(uint32_t bank)
 {
     (void)bank;
-    return 1;
-}
-
-uint32_t nand_block_erase(uint32_t bank, uint32_t page)
-{
-    (void)bank; (void)page;
-    return 1;
+    return 0;
 }
 
 uint32_t nand_reset(uint32_t bank)
 {
     if (bank >= 4) return 1;
-    return nand3g_reset(NAND3G_CTRL, bank) ? 1 : 0;
+    mutex_lock(&nand_mtx);
+    int r = nand3g_reset(NAND3G_CTRL, bank);
+    mutex_unlock(&nand_mtx);
+    return r ? 1 : 0;
+}
+
+uint32_t nand_block_erase(uint32_t bank, uint32_t page)
+{
+    if (!nand3g_write_enable) return 1;
+    if (bank >= 4 || nand_type[bank] < 0) return 1;
+    mutex_lock(&nand_mtx);
+    nand_last_activity_value = current_tick;
+    nand3g_stat_erases++;
+    int r = nand3g_erase_block(NAND3G_CTRL, bank, page / NAND3G_PAGES_PER_BLOCK);
+    mutex_unlock(&nand_mtx);
+    if (r != 0) { nand3g_stat_write_errors++; return 1; }
+    return 0;
 }
 
 const struct nand_device_info_type* nand_get_device_type(uint32_t bank)
