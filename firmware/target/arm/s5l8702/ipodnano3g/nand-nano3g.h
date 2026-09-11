@@ -29,6 +29,7 @@
 #include <stdbool.h>
 
 #define NAND3G_PAGE_SIZE   2048
+#define NAND3G_PAGES_PER_BLOCK 128
 #define NAND3G_SPARE_WORDS 3
 #define NAND3G_NUM_CTRL    2   /* FMC controllers, 0x400 apart */
 #define NAND3G_NUM_CE      4   /* chip enables per controller probed */
@@ -66,6 +67,10 @@ int nand3g_read_id(int ctrl, int ce, uint8_t id[8]);
    afterwards. 'spare' receives the 3 metadata words the ROM returns.
    Returns NAND3G_ECC_* (>= 0) or a negative error. 'raw_stat' (may be
    NULL) receives the OR of the per-chunk ECC status for diagnostics. */
+int nand3g_erase_block(int c, int ce, uint32_t block);
+int nand3g_write_page(int c, int ce, uint32_t page, const void *data, const uint32_t spare[NAND3G_SPARE_WORDS]);
+extern unsigned nand3g_dbg_wstat;
+extern unsigned nand3g_dbg_wstep, nand3g_dbg_wfail_stat, nand3g_dbg_wfail_ecc, nand3g_dbg_wfail_sp;
 int nand3g_read_page(int ctrl, int ce, uint32_t page,
                      void *data, uint32_t spare[NAND3G_SPARE_WORDS],
                      uint32_t *raw_stat);
