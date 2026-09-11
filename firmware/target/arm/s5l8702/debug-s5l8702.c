@@ -22,6 +22,7 @@
 #include <stdbool.h>
 #include "system.h"
 #include "config.h"
+#include "usb-designware.h"
 #include "kernel.h"
 #include "button.h"
 #include "lcd.h"
@@ -58,7 +59,7 @@ bool dbg_hw_info(void)
 #ifdef UC87XX_DEBUG
     const unsigned int max_states=3;
 #elif defined(IPOD_NANO3G)
-    const unsigned int max_states=3;
+    const unsigned int max_states=4;
 #else
     const unsigned int max_states=2;
 #endif
@@ -187,6 +188,30 @@ bool dbg_hw_info(void)
         {
             extern int pcm_nano3g_debug(int line);
             line = pcm_nano3g_debug(line);
+        }
+#endif
+#ifdef IPOD_NANO3G
+        else if(state==3)
+        {
+            _DEBUG_PRINTF("USB debug:");
+            extern unsigned usb_dbg_enable_clocks, usb_dbg_usb_enable;
+            extern int usb_detect(void);
+            _DEBUG_PRINTF("USB: detect %d usb_enable calls %u phy inits %u",
+                          usb_detect(), usb_dbg_usb_enable, usb_dbg_enable_clocks);
+            extern uint32_t usb_dbg_hw[5]; extern int usb_dbg_clocks_on;
+            extern unsigned usb_dbg_irqs, usb_dbg_rst, usb_dbg_enumdne, usb_dbg_setups, usb_dbg_oep, usb_dbg_iep;
+            extern uint32_t usb_dbg_dsts, usb_dbg_gintsts_last, usb_dbg_doepint0;
+            _DEBUG_PRINTF("DWC id %08lx cfg1 %08lx cfg2 %08lx", usb_dbg_hw[0], usb_dbg_hw[1], usb_dbg_hw[2]);
+            _DEBUG_PRINTF("DWC cfg3 %08lx cfg4 %08lx clk %d", usb_dbg_hw[3], usb_dbg_hw[4], usb_dbg_clocks_on);
+            _DEBUG_PRINTF("irq %u rst %u enum %u setup %u oep %u iep %u",
+                          usb_dbg_irqs, usb_dbg_rst, usb_dbg_enumdne, usb_dbg_setups, usb_dbg_oep, usb_dbg_iep);
+            _DEBUG_PRINTF("dsts %08lx gint %08lx doep0 %08lx", usb_dbg_dsts, usb_dbg_gintsts_last, usb_dbg_doepint0);
+            if (usb_dbg_clocks_on)
+                _DEBUG_PRINTF("live gintsts %08lx dsts %08lx dctl %08lx gusbcfg %08lx",
+                              DWC_GINTSTS, DWC_DSTS, DWC_DCTL, DWC_GUSBCFG);
+            if (usb_dbg_clocks_on)
+                _DEBUG_PRINTF("doepctl0 %08lx doeptsiz0 %08lx gahbcfg %08lx daint %08lx",
+                              DWC_DOEPCTL(0), DWC_DOEPTSIZ(0), DWC_GAHBCFG, DWC_DAINT);
         }
 #endif
 #ifdef UC87XX_DEBUG

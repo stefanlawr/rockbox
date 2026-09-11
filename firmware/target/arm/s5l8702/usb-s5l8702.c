@@ -48,11 +48,39 @@ const struct usb_dw_config usb_dw_config =
 #endif
 };
 
+unsigned usb_dbg_enable_clocks, usb_dbg_usb_enable;
+#ifdef IPOD_NANO3G
+uint32_t usb_dbg_hw[5];      /* GSNPSID, GHWCFG1..4 */
+int usb_dbg_clocks_on;
+#endif
+
 void usb_dw_target_enable_clocks()
 {
+    usb_dbg_enable_clocks++;
     clockgate_enable(CLOCKGATE_USBOTG, true);
     clockgate_enable(CLOCKGATE_USBPHY, true);
 
+#ifdef IPOD_NANO3G
+    /* PHY bring-up exactly as the nano 3G boot ROM does it (DFU mode
+       enumerates with this): power up, reset pulse, 0x18 = 0x600,
+       clock select 0. The ROM never touches 0x1c or 0x44. */
+    DWC_PCGCCTL = 0;
+    OPHYPWR = 0;
+    udelay(1000);
+    ORSTCON = 1;
+    udelay(1000);
+    ORSTCON = 0;
+    udelay(1000);
+    OPHYUNK3 = 0x600;
+    OPHYCLK = 0;
+    udelay(2000);
+    usb_dbg_hw[0] = DWC_GSNPSID;
+    usb_dbg_hw[1] = DWC_GHWCFG1;
+    usb_dbg_hw[2] = DWC_GHWCFG2;
+    usb_dbg_hw[3] = DWC_GHWCFG3;
+    usb_dbg_hw[4] = DWC_GHWCFG4;
+    usb_dbg_clocks_on = 1;
+#else
     OPHYPWR = 0;  /* PHY: Power up */
     udelay(10);
     OPHYUNK1 = 1;
@@ -64,6 +92,7 @@ void usb_dw_target_enable_clocks()
     OPHYUNK3 = 0x600;
     OPHYCLK = USB_DW_CLOCK;
     udelay(400);
+#endif
 }
 
 void usb_dw_target_disable_clocks()
@@ -79,6 +108,9 @@ void usb_dw_target_disable_clocks()
     udelay(1000);
 #endif
 
+#ifdef IPOD_NANO3G
+    usb_dbg_clocks_on = 0;
+#endif
     clockgate_enable(CLOCKGATE_USBOTG, false);
     clockgate_enable(CLOCKGATE_USBPHY, false);
 }
@@ -102,6 +134,7 @@ static int usb_status = USB_EXTRACTED;
 
 void usb_enable(bool on)
 {
+    usb_dbg_usb_enable++;
 #ifdef HAVE_USBSTACK
     if (on) usb_core_init();
     else usb_core_exit();
