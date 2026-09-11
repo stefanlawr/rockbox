@@ -288,6 +288,9 @@ int main(int argc, char **argv)
     check_sim("format");
     remount("after format");
     check_pool("after format");
+    CHECK(ftl_nano3g_remap_ok, "remap check after format");
+    /* from here on any program/erase of the VFL ring blocks is an error */
+    for (int b = 2; b <= 4; b++) { sim_set_bad(0, b, 1); sim_set_bad(1, b, 1); }
 
     printf("S0: vPage -> (die, physical page) mapping is a bijection inside the pool space\n");
     {
@@ -315,12 +318,13 @@ int main(int argc, char **argv)
         free(used);
         printf("  %u vPages: die0 %u die1 %u, collisions %u, out of range %u, reserved hits %u\n",
                (nvb - 1) * ppb, dies[0], dies[1], collisions, oob, reserved);
-        printf("  note: vBlocks 1 and 2 overlap physical blocks 2..5 (VFL context ring 1..4); the FTL guard refuses them\n");
+        printf("  note: reserved hits are vBlock 0 neighbours (physical 0,1 = boot + VFL cxt) as expected\n");
         CHECK(collisions == 0 && oob == 0 && dies[0] == dies[1], "S0 mapping");
     }
 
-    printf("S1: a few scattered single-page writes\n");
+    printf("S1: a few scattered single-page writes (including lBlocks 0 and 1 = vBlocks 1 and 2)\n");
     for (uint32_t i = 0; i < 5; i++) { do_write(3 * 1024 + i * 7, 1); note_touched(3 * 1024 + i * 7, 1); }
+    do_write(0, 3); do_write(1024 + 5, 2); note_touched(0, 2048);
     check_all("S1 before sync"); check_pool("S1");
     CHECK(ftl_sync() == 0, "S1 sync");
     check_all("S1 after sync"); check_pool("S1 synced"); check_sim("S1");
