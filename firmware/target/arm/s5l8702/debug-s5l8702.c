@@ -234,6 +234,15 @@ bool dbg_hw_info(void)
             _DEBUG_PRINTF("writes %u erases %u errs %u verified %lu vfail %lu cfail %lu",
                           nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors,
                           ftl_dbg_verify[3], ftl_dbg_verify[1], ftl_dbg_verify[2]);
+            {
+                extern uint32_t ftl_watch[8];
+                static const char *reg[3] = { "cxt", "map", "vfl" };
+                _DEBUG_PRINTF("watch armed %lu changes %lu first tick %lu (now %ld) last %lu",
+                              ftl_watch[0], ftl_watch[1], ftl_watch[2], current_tick, ftl_watch[7]);
+                if (ftl_watch[1])
+                    _DEBUG_PRINTF("first change: %s +0x%lx  %08lx -> %08lx", reg[ftl_watch[3] % 3],
+                                  ftl_watch[4], ftl_watch[5], ftl_watch[6]);
+            }
             _DEBUG_PRINTF("guard %lu (%lx) badrelease %lu (%lu) rotations %lu (last %lu->%lu)",
                           ftl_dbg_guard[0], ftl_dbg_guard[1], ftl_dbg_badrelease[0], ftl_dbg_badrelease[1],
                           ftl_dbg_ctrlrot[0], ftl_dbg_ctrlrot[1] & 0xffff, ftl_dbg_ctrlrot[1] >> 16);
