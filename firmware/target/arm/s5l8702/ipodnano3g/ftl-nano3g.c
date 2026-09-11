@@ -2806,8 +2806,11 @@ void ftl_nano3g_state(uint32_t *out)
     out[12] = ftl_vfl_cxt[1].ftlctrlblocks[2] | (ftl_vfl_cxt[1].usn << 16);
     out[13] = ftl_vfl_cxt[0].nextcxtpage | (ftl_vfl_cxt[1].nextcxtpage << 16);
     out[14] = ftl_nano3g_ctrl_ok | (ftl_nano3g_remap_ok << 1);
-    uint32_t logs = 0, i;
+    uint32_t logs = 0;
+#ifndef FTL_READONLY
+    uint32_t i;
     for (i = 0; i < 0x11; i++) if (ftl_log[i].scatteredvblock != 0xFFFF) logs++;
+#endif
     out[15] = logs;
 }
 
