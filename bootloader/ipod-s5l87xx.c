@@ -991,6 +991,70 @@ static void i2s_tx_test(void)
 static uint8_t wt_orig[4096] STORAGE_ALIGN_ATTR;
 static uint8_t wt_pat[4096] STORAGE_ALIGN_ATTR;
 static uint8_t wt_back[4096] STORAGE_ALIGN_ATTR;
+/* ---- FTL write test 2: like test 1, then ftl_sync() (commits map, erase
+   counters and context: control block rotation + VFL context commit),
+   then a second small write so the FTL leaves its dirty marker (type
+   0x47) above the new context and the OF runs its restore on top of it
+   rather than trusting the context blindly. ---- */
+static void ftl_wtest2(void)
+{
+    extern uint32_t ftl_unclean, ftl_restore_stats[8];
+    extern uint32_t ftl_dbg_ctrl[6];
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("FTL write test 2 (sync)");
+    int rc = storage_init();
+    printf("storage_init %d, unclean %lu restore rc %lu logs %lu free %lu", rc,
+           (unsigned long)ftl_unclean, (unsigned long)ftl_restore_stats[0],
+           (unsigned long)ftl_restore_stats[1], (unsigned long)ftl_restore_stats[2]);
+    if (rc) goto end;
+    filesystem_init();
+    rc = disk_mount_all();
+    if (rc <= 0) { printf("disk_mount_all %d", rc); goto end; }
+
+    for (int i = 0; i < 4096; i++) wt_pat[i] = "NANO3G-WRITE-TEST-2 "[i % 20];
+    nand3g_write_enable = 1;
+    int fd = open("/testtone.wav", O_WRONLY);
+    if (fd < 0) { printf("open for write failed %d", fd); nand3g_write_enable = 0; goto end; }
+    int n = write(fd, wt_pat, 4096);
+    rc = close(fd);
+    printf("write %d close %d; writes %u erases %u err %u", n, rc,
+           nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors);
+    printf("ctrl blocks before: %lx %lx %lx page %lx usn %lx",
+           (unsigned long)ftl_dbg_ctrl[0], (unsigned long)ftl_dbg_ctrl[1],
+           (unsigned long)ftl_dbg_ctrl[2], (unsigned long)ftl_dbg_ctrl[3], (unsigned long)ftl_dbg_ctrl[4]);
+    unsigned w0 = nand3g_stat_writes, e0 = nand3g_stat_erases;
+    rc = ftl_sync();
+    printf("ftl_sync rc %d: +%u writes +%u erases err %u", rc,
+           nand3g_stat_writes - w0, nand3g_stat_erases - e0, nand3g_stat_write_errors);
+    printf("ctrl blocks after: %lx %lx %lx page %lx usn %lx vflcommits %lu",
+           (unsigned long)ftl_dbg_ctrl[0], (unsigned long)ftl_dbg_ctrl[1],
+           (unsigned long)ftl_dbg_ctrl[2], (unsigned long)ftl_dbg_ctrl[3],
+           (unsigned long)ftl_dbg_ctrl[4], (unsigned long)ftl_dbg_ctrl[5]);
+    if (rc == 0)
+    {
+        for (int i = 0; i < 4096; i++) wt_pat[i] = "NANO3G-WRITE-TEST-3 "[i % 20];
+        fd = open("/testtone.wav", O_WRONLY);
+        n = write(fd, wt_pat, 4096);
+        rc = close(fd);
+        printf("2nd write %d close %d (dirty mark): writes %u erases %u err %u", n, rc,
+               nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors);
+    }
+    nand3g_write_enable = 0;
+    fd = open("/testtone.wav", O_RDONLY);
+    n = read(fd, wt_back, 4096);
+    close(fd);
+    printf("readback: %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c", wt_back[0], wt_back[1], wt_back[2],
+           wt_back[3], wt_back[4], wt_back[5], wt_back[6], wt_back[7], wt_back[8], wt_back[9],
+           wt_back[10], wt_back[11], wt_back[12], wt_back[13], wt_back[14], wt_back[15],
+           wt_back[16], wt_back[17], wt_back[18], wt_back[19]);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static void ftl_wtest1(void)
 {
     extern uint32_t ftl_unclean, ftl_restore_stats[8];
@@ -1624,6 +1688,7 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "FTL write test 2: write + ftl_sync + write (dirty)",
         "FTL write test 1: rewrite testtone.wav head (no sync)",
         "NAND write test 1: find erased block (no write)",
         "NAND write test 2: ERASE+PROGRAM that block",
@@ -1657,6 +1722,7 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        ftl_wtest2,
         ftl_wtest1,
         nand_wtest_find,
         nand_wtest_run,

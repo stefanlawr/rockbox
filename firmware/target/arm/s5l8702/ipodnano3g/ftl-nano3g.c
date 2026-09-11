@@ -392,7 +392,8 @@ static struct nand_device_info_type ftl_vtype;
 uint32_t ftl_dbg[12];
 uint32_t ftl_unclean;          /* unclean marker seen above the FTL cxt */
 uint32_t ftl_restore_stats[8];
-uint32_t ftl_restore_dbg[8]; /* rc, logs, free, map diffs, highest usn, scanned, empty, 0 */
+uint32_t ftl_restore_dbg[8];
+uint32_t ftl_dbg_ctrl[6];   /* ctrl blocks, ctrl page, cxt usn, vfl commits */ /* rc, logs, free, map diffs, highest usn, scanned, empty, 0 */
 
 /* Block map, used vor pBlock to vBlock mapping */
 static uint16_t ftl_map[0x2000];
@@ -402,6 +403,12 @@ static struct ftl_vfl_cxt_type ftl_vfl_cxt[4];
 
 /* FTL context */
 static struct ftl_cxt_type ftl_cxt;
+static void ftl_dbg_ctrl_update(void)
+{
+    ftl_dbg_ctrl[0] = ftl_cxt.ftlctrlblocks[0]; ftl_dbg_ctrl[1] = ftl_cxt.ftlctrlblocks[1];
+    ftl_dbg_ctrl[2] = ftl_cxt.ftlctrlblocks[2]; ftl_dbg_ctrl[3] = ftl_cxt.ftlctrlpage;
+    ftl_dbg_ctrl[4] = ftl_cxt.usn;
+}
 
 /* Temporary data buffers for internal use by the FTL */
 static uint8_t ftl_buffer[0x800] STORAGE_ALIGN_ATTR;
@@ -639,6 +646,7 @@ static uint32_t ftl_vfl_store_cxt(uint32_t bank)
    retries until it works or all available pages have been tried */
 static uint32_t ftl_vfl_commit_cxt(uint32_t bank)
 {
+    ftl_dbg_ctrl[5]++;
     DEBUGF("FTL: VFL: Committing context on bank %d\n", bank);
     if (ftl_vfl_cxt[bank].nextcxtpage + 8 <= ftl_nand_type->pagesperblock)
         if (ftl_vfl_store_cxt(bank) == 0) return 0;
@@ -1447,6 +1455,7 @@ static uint32_t ftl_restore(void)
     for (i = 0; i < numlogs; i++) ftl_log[i].usn = ftl_cxt.nextblockusn - 1;
     ftl_restore_stats[4] = highest_usn;
     ftl_restore_stats[0] = 0;
+    ftl_dbg_ctrl_update();
     return 0;
 }
 #endif
@@ -2487,6 +2496,7 @@ uint32_t ftl_sync(void)
     for (i = 0; i < 5; i++)
         if (ftl_commit_cxt() == 0)
         {
+            ftl_dbg_ctrl_update();
             mutex_unlock(&ftl_mtx);
             return 0;
         }
