@@ -792,7 +792,13 @@ int nand_init(void)
        already mounted then and holds unsynced log state, so sync it rather
        than mounting again from the (older) on-flash context. */
     if (ftl_mounted)
-        return ftl_sync() ? 1 : 0;
+    {
+#if defined(BOOTLOADER)
+        return 0;   /* the bootloaders re-init from their menus; never sync there */
+#else
+        return nand3g_write_enable ? (ftl_sync() ? 1 : 0) : 0;
+#endif
+    }
     if (ftl_init()) return 1;
     ftl_mounted = true;
     return 0;

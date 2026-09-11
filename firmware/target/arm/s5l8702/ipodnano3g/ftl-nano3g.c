@@ -394,6 +394,7 @@ static struct nand_device_info_type ftl_vtype;
    page (unclean shutdown), 6 map page read failed, 7 no device info. */
 uint32_t ftl_dbg[12];
 uint32_t ftl_unclean;          /* unclean marker seen above the FTL cxt */
+uint32_t ftl_found_cxtpage;    /* vPage of the 0x43 context page the mount used */
 uint32_t ftl_restore_stats[8];
 uint32_t ftl_restore_dbg[8];
 uint32_t ftl_dbg_ctrl[6];
@@ -1620,6 +1621,7 @@ static uint32_t ftl_open(void)
         else if (ftl_sparebuffer[0].meta.type == 0x43)
         {
             memcpy(&ftl_cxt, ftl_buffer, 0x28C);
+            ftl_found_cxtpage = ppb * ftlcxtblock + i;
             ftlcxtfound = 1;
             break;
         }
@@ -2769,14 +2771,21 @@ uint32_t ftl_nano3g_force_restore(void)
    rebuilds its state on the next boot instead of trusting the context. */
 uint32_t ftl_nano3g_mark_unclean(void)
 {
-    uint32_t rc;
+    uint32_t rc, page;
     mutex_lock(&ftl_mtx);
-    if (ftl_next_ctrl_pool_page() != 0) { mutex_unlock(&ftl_mtx); return 1; }
+    /* The page right above the context page the mount found. The context's
+       own ftlctrlpage is not used: it can be garbage in a bad context. */
+    page = ftl_found_cxtpage + 1;
+    if (ftl_found_cxtpage == 0 || page % ppb == 0)
+    { mutex_unlock(&ftl_mtx); return 2; }   /* block full: needs a rotation, refuse */
+    rc = ftl_vfl_read(page, ftl_verifybuf, &ftl_verifyspare, 1, 0);
+    if (!(rc & 2)) { mutex_unlock(&ftl_mtx); return 3; }   /* not empty */
     memset(ftl_buffer, 0xFF, 0x800);
     memset(&ftl_sparebuffer[0], 0xFF, 0x40);
     ftl_sparebuffer[0].meta.usn = ftl_cxt.usn;
     ftl_sparebuffer[0].meta.type = 0x4F;
-    rc = ftl_vfl_write(ftl_cxt.ftlctrlpage, 1, ftl_buffer, &ftl_sparebuffer[0]);
+    rc = ftl_vfl_write(page, 1, ftl_buffer, &ftl_sparebuffer[0]);
+    ftl_cxt.ftlctrlpage = page;
     ftl_cxt.clean_flag = 0;
     ftl_dbg_ctrl_update();
     mutex_unlock(&ftl_mtx);
