@@ -373,6 +373,42 @@ static void set_serial_descriptor(void)
         device_descriptor.iSerialNumber = 0;
     }
 }
+#elif defined(IPOD_NANO3G)
+/* Serial number from the SysCfg area of the boot NOR ("SrNm" entry,
+   the same value Apple's firmware reports). A stable serial keeps
+   Windows from binding a stale device instance to the Rockbox device. */
+#include "norboot-target.h"
+static void set_serial_descriptor(void)
+{
+    static struct SysCfg syscfg;
+    bootflash_init(SPI_PORT);
+    ssize_t result = syscfg_read(&syscfg);
+    const char* serial = NULL;
+    if (result != -1)
+    {
+        size_t n = MIN(syscfg.header.num_entries, SYSCFG_MAX_ENTRIES);
+        for (size_t i = 0; i < n; i++)
+            if (syscfg.entries[i].tag == SYSCFG_TAG_SRNM)
+            {
+                serial = (const char*)syscfg.entries[i].data;
+                break;
+            }
+    }
+    if (serial == NULL || serial[0] == 0)
+    {
+        device_descriptor.iSerialNumber = 0;
+        return;
+    }
+    short* p = &usb_string_iSerial.wString[0];
+    int len = 0;
+    while (len < 16 && serial[len] >= 0x20 && serial[len] < 0x7F)
+    {
+        *p++ = serial[len];
+        len++;
+    }
+    usb_string_iSerial.bLength = 2 + len * 2;
+}
+
 #elif (CONFIG_STORAGE & STORAGE_ATA)
 /* If we don't know the device serial number, use the one
  * from the disk */
