@@ -83,6 +83,7 @@
 
 void bootflash_init(int port);
 void bootflash_read(int port, uint32_t addr, uint32_t size, void* buf);
+void bootflash_read_id(int port, uint8_t id[3], uint8_t* status);
 void bootflash_write(int port, int offset, void* addr, int size);
 int bootflash_compare(int port, int offset, void* addr, int size);
 void bootflash_erase_blocks(int port, int first, int n);
