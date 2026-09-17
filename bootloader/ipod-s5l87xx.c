@@ -1655,6 +1655,33 @@ static void nor_chip_id(void)
     while (button_status() != BUTTON_SELECT) sleep(HZ/100);
 }
 
+
+/* Read-only: print the write-failure breadcrumb the main firmware leaves at
+   the top of DRAM before a dc_writeback panic (see ftl_nano3g_crumb_write). */
+static void show_crumb(void)
+{
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("Write-failure crumb (read-only)");
+    uint32_t *c = (uint32_t*)(DRAM_ORIG + DRAM_SIZE - 256);
+    if (c[0] != 0x4E33474B) { printf("no crumb (magic %08lx)", (unsigned long)c[0]); goto end; }
+    printf("code %ld sector %lu cnt %lu werr %ld alloc %lx", (long)c[1], (unsigned long)c[2],
+           (unsigned long)c[3], (long)c[4], (unsigned long)c[5]);
+    printf("ctrl %lu %lu %lu free %lu page %lx", (unsigned long)(c[6] & 0xffff), (unsigned long)(c[6] >> 16),
+           (unsigned long)(c[7] & 0xffff), (unsigned long)(c[7] >> 16), (unsigned long)c[8]);
+    printf("guard hits %lu op %lu pg %lx ce %lu off %lu..%lu word %08lx rc %ld", (unsigned long)c[9],
+           (unsigned long)c[10], (unsigned long)c[11], (unsigned long)c[12], (unsigned long)c[13],
+           (unsigned long)c[14], (unsigned long)c[15], (long)c[16]);
+    printf("watch armed %lu changes %lu first tick %lu region %lu off %lx %08lx->%08lx",
+           (unsigned long)c[17], (unsigned long)c[18], (unsigned long)c[19], (unsigned long)c[20],
+           (unsigned long)c[21], (unsigned long)c[22], (unsigned long)c[23]);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
 static volatile uint32_t dma_test_cbs;
@@ -2143,6 +2170,7 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+        "Show write-failure crumb (read-only)",
         "Mark unclean in current ctrl block (no restore)",
         "VFL state dump (read-only)",
         "Low blocks probe (read-only)",
@@ -2186,6 +2214,7 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+        show_crumb,
         mark_unclean_inplace,
         vfl_dump,
         low_blocks_probe,
