@@ -46,6 +46,7 @@
 /* nano 3G bring-up: after every sync leave a 0x47 dirty mark above the new
    context (see ftl_sync). */
 #define FTL_NANO3G_DIRTY_AFTER_SYNC
+#define FTL_NANO3G_NO_WATCH_TICK
 
 
 #ifdef FTL_READONLY
@@ -468,6 +469,7 @@ static union ftl_spare_data_type ftl_verifyspare STORAGE_ALIGN_ATTR;
 uint32_t ftl_dbg_verify[6]; /* write fails, verify fails, copy verify fails,
                                pages verified, last bad vpage, last bad bank */
 uint32_t ftl_dbg_guard[2];  /* refused writes/erases, last refused pblock */
+uint32_t ftl_dbg_werr[4];   /* last ftl_write failure: code, sector, count, allocation detail */
 
 /* Physical blocks the FTL must never program or erase on this device:
    0 (boot image) and 1 (the VFL context block actually in use) in the
@@ -1948,8 +1950,12 @@ static uint32_t ftl_allocate_pool_block(void)
     /* nano 3G: pool blocks are erased when released (see
        ftl_release_pool_block), so only erase here if the block is not
        empty (first and last page), e.g. after a restore. */
+    ftl_dbg_werr[3] = block | 0x10000;               /* candidate chosen */
     if (!ftl_vblock_is_empty(block))
-        if (ftl_erase_block(block) != 0) return 0xFFFFFFFF;
+    {
+        ftl_dbg_werr[3] = block | 0x20000;           /* needs erase */
+        if (ftl_erase_block(block) != 0) { ftl_dbg_werr[3] = block | 0x30000; return 0xFFFFFFFF; }
+    }
     if (++ftl_cxt.nextfreeidx == 0x14) ftl_cxt.nextfreeidx = 0;
     ftl_cxt.freecount--;
     return block;
@@ -2508,14 +2514,17 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
     }
     if (count == 0) return 0;
 
+    ftl_dbg_werr[1] = sector; ftl_dbg_werr[2] = count;
     if (!ftl_nano3g_remap_ok)
     {
         DEBUGF("FTL: reserved-block substitution unverified, refusing to write\n");
+        ftl_dbg_werr[0] = -10;
         return -10;
     }
     if (!ftl_nano3g_ctrl_ok)
     {
         DEBUGF("FTL: control block list not sane, refusing to write\n");
+        ftl_dbg_werr[0] = -11;
         return -11;
     }
     /* nano 3G: spare-block remapping is not applied by ftl_vfl_read/write,
@@ -2565,6 +2574,7 @@ uint32_t ftl_write(uint32_t sector, uint32_t count, const void* buffer)
         struct ftl_log_type* logentry = ftl_allocate_log_entry(block);
         if (logentry == NULL)
         {
+            ftl_dbg_werr[0] = -5;
             mutex_unlock(&ftl_mtx);
             return -5;
         }
@@ -2837,6 +2847,7 @@ static void ftl_nano3g_watch_tick(void)
         memcpy((void*)b[r], a[r], n[r]);   /* re-arm on the new content */
     }
 }
+void ftl_nano3g_watch_poll(void) { ftl_nano3g_watch_tick(); }
 void ftl_nano3g_watch_arm(void)
 {
     memcpy(watch_cxt, &ftl_cxt, sizeof(watch_cxt));
@@ -2844,6 +2855,37 @@ void ftl_nano3g_watch_arm(void)
     memcpy(watch_vfl, ftl_vfl_cxt, sizeof(watch_vfl));
     ftl_watch[1] = 0;
     ftl_watch[0] = 1;
+}
+#endif
+
+#if !defined(BOOTLOADER)
+/* Panic breadcrumb: 64 words at the top of DRAM, untouched by the
+   bootloader and by Rockbox until audio buffering starts, so a record
+   written just before a write-failure panic survives the reset. */
+#define CRUMB_MAGIC 0x4E33474B
+static uint32_t *crumb_ptr(void) { return (uint32_t*)(DRAM_ORIG + DRAM_SIZE - 256); }
+uint32_t ftl_crumb[24];   /* copy of the last breadcrumb, [0] = 1 if one was found */
+void ftl_nano3g_crumb_write(int code, uint32_t sector, uint32_t count)
+{
+    uint32_t *c = crumb_ptr();
+    extern uint32_t nand3g_guard[8];
+    c[0] = CRUMB_MAGIC; c[1] = (uint32_t)code; c[2] = sector; c[3] = count;
+    c[4] = ftl_dbg_werr[0]; c[5] = ftl_dbg_werr[3];
+    c[6] = ftl_cxt.ftlctrlblocks[0] | (ftl_cxt.ftlctrlblocks[1] << 16);
+    c[7] = ftl_cxt.ftlctrlblocks[2] | (ftl_cxt.freecount << 16);
+    c[8] = ftl_cxt.ftlctrlpage;
+    memcpy(&c[9], nand3g_guard, 8 * 4);
+    memcpy(&c[17], ftl_watch, 7 * 4);
+    commit_dcache();
+}
+static void ftl_nano3g_crumb_read(void)
+{
+    uint32_t *c = crumb_ptr();
+    if (c[0] != CRUMB_MAGIC) { ftl_crumb[0] = 0; return; }
+    ftl_crumb[0] = 1;
+    memcpy(&ftl_crumb[1], &c[1], 23 * 4);
+    c[0] = 0;
+    commit_dcache();
 }
 #endif
 
@@ -2974,10 +3016,13 @@ uint32_t ftl_init(void)
         {
 #if !defined(BOOTLOADER)
             static bool watch_registered;
+            ftl_nano3g_crumb_read();
             ftl_nano3g_watch_arm();
             if (!watch_registered)
             {
+#ifndef FTL_NANO3G_NO_WATCH_TICK
                 tick_add_task(ftl_nano3g_watch_tick);
+#endif
                 watch_registered = true;
             }
 #endif

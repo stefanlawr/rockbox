@@ -896,7 +896,15 @@ int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
         nand3g_stat_dropped_writes += count;
         return 0;
     }
-    return ftl_write(start, count, outbuf) ? -1 : 0;
+    {
+        uint32_t rc = ftl_write(start, count, outbuf);
+        if (rc == 0) return 0;
+#if !defined(BOOTLOADER)
+        extern void ftl_nano3g_crumb_write(int code, uint32_t sector, uint32_t count);
+        ftl_nano3g_crumb_write((int)rc, start, count);
+#endif
+        return -1;
+    }
 }
 
 int nand_event(long id, intptr_t data)

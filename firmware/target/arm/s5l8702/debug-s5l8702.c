@@ -251,6 +251,21 @@ bool dbg_hw_info(void)
                               nand3g_guard[0], nand3g_guard[1], nand3g_guard[2], nand3g_guard[3],
                               nand3g_guard[4], nand3g_guard[5], nand3g_guard[6], (long)nand3g_guard[7]);
             }
+            {
+                extern uint32_t ftl_crumb[24], ftl_dbg_werr[4];
+                _DEBUG_PRINTF("last write err %ld sector %lu cnt %lu alloc %lx", (long)ftl_dbg_werr[0],
+                              ftl_dbg_werr[1], ftl_dbg_werr[2], ftl_dbg_werr[3]);
+                if (ftl_crumb[0])
+                {
+                    _DEBUG_PRINTF("CRUMB from last panic: code %ld sector %lu cnt %lu werr %ld alloc %lx",
+                                  (long)ftl_crumb[1], ftl_crumb[2], ftl_crumb[3], (long)ftl_crumb[4], ftl_crumb[5]);
+                    _DEBUG_PRINTF(" ctrl %lu %lu %lu free %lu page %lx guard hits %lu op %lu pg %lx off %lu..%lu",
+                                  ftl_crumb[6] & 0xffff, ftl_crumb[6] >> 16, ftl_crumb[7] & 0xffff, ftl_crumb[7] >> 16,
+                                  ftl_crumb[8], ftl_crumb[9], ftl_crumb[10], ftl_crumb[11], ftl_crumb[13], ftl_crumb[14]);
+                    _DEBUG_PRINTF(" watch changes %lu first tick %lu region %lu off %lx %08lx->%08lx",
+                                  ftl_crumb[18], ftl_crumb[19], ftl_crumb[20], ftl_crumb[21], ftl_crumb[22], ftl_crumb[23]);
+                }
+            }
             _DEBUG_PRINTF("guard %lu (%lx) badrelease %lu (%lu) rotations %lu (last %lu->%lu)",
                           ftl_dbg_guard[0], ftl_dbg_guard[1], ftl_dbg_badrelease[0], ftl_dbg_badrelease[1],
                           ftl_dbg_ctrlrot[0], ftl_dbg_ctrlrot[1] & 0xffff, ftl_dbg_ctrlrot[1] >> 16);
