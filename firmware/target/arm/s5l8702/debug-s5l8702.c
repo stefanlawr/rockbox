@@ -236,12 +236,20 @@ bool dbg_hw_info(void)
                           ftl_dbg_verify[3], ftl_dbg_verify[1], ftl_dbg_verify[2]);
             {
                 extern uint32_t ftl_watch[8];
+                extern void ftl_nano3g_watch_poll(void);
+                ftl_nano3g_watch_poll();
                 static const char *reg[3] = { "cxt", "map", "vfl" };
                 _DEBUG_PRINTF("watch armed %lu changes %lu first tick %lu (now %ld) last %lu",
                               ftl_watch[0], ftl_watch[1], ftl_watch[2], current_tick, ftl_watch[7]);
                 if (ftl_watch[1])
                     _DEBUG_PRINTF("first change: %s +0x%lx  %08lx -> %08lx", reg[ftl_watch[3] % 3],
                                   ftl_watch[4], ftl_watch[5], ftl_watch[6]);
+            }
+            {
+                extern uint32_t nand3g_guard[8];
+                _DEBUG_PRINTF("nand guard hits %lu: op %lu page %lx ce %lu off %lu..%lu word %08lx rc %ld",
+                              nand3g_guard[0], nand3g_guard[1], nand3g_guard[2], nand3g_guard[3],
+                              nand3g_guard[4], nand3g_guard[5], nand3g_guard[6], (long)nand3g_guard[7]);
             }
             _DEBUG_PRINTF("guard %lu (%lx) badrelease %lu (%lu) rotations %lu (last %lu->%lu)",
                           ftl_dbg_guard[0], ftl_dbg_guard[1], ftl_dbg_badrelease[0], ftl_dbg_badrelease[1],

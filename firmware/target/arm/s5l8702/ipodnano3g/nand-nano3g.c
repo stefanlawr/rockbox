@@ -104,7 +104,37 @@
 /* Timeouts (microseconds). The ROM busy-loops 100000 iterations; be generous. */
 #define NAND3G_TIMEOUT_US   200000
 
-static uint8_t nand3g_buf[NAND3G_PAGE_SIZE] STORAGE_ALIGN_ATTR;
+/* The page buffer is followed by a guard zone. On the MB245 the FTL
+   context in memory was overwritten in a way that matches a DMA overrun
+   past this buffer (ftl_cxt sat 0x78 bytes behind it, the NAND mutex
+   0x14 bytes). The guard absorbs such an overrun and every NAND operation
+   checks it (through the uncached alias, DMA bypasses the cache) so the
+   offending operation and the overrun length are recorded. */
+#define NAND3G_GUARD_SZ 8192
+static uint8_t nand3g_buf[NAND3G_PAGE_SIZE + NAND3G_GUARD_SZ] STORAGE_ALIGN_ATTR;
+uint32_t nand3g_guard[8]; /* violations, op(1r 2w 3e), page, ce, first off, last off, first word, rc */
+static void nand3g_guard_fill(void)
+{
+    uint8_t *base = nand3g_buf; volatile uint8_t *g = S5L8702_UNCACHED_ADDR(base) + NAND3G_PAGE_SIZE;
+    for (unsigned i = 0; i < NAND3G_GUARD_SZ; i++) g[i] = (uint8_t)(0xA5 ^ i);
+}
+static void nand3g_guard_check(uint32_t op, uint32_t page, uint32_t ce, int rc)
+{
+    uint8_t *base = nand3g_buf; volatile uint8_t *g = S5L8702_UNCACHED_ADDR(base) + NAND3G_PAGE_SIZE;
+    unsigned first = NAND3G_GUARD_SZ, last = 0;
+    for (unsigned i = 0; i < NAND3G_GUARD_SZ; i++)
+        if (g[i] != (uint8_t)(0xA5 ^ i)) { if (first == NAND3G_GUARD_SZ) first = i; last = i; }
+    if (first == NAND3G_GUARD_SZ) return;
+    if (nand3g_guard[0] == 0)
+    {
+        nand3g_guard[1] = op; nand3g_guard[2] = page; nand3g_guard[3] = ce;
+        nand3g_guard[4] = first; nand3g_guard[5] = last;
+        nand3g_guard[6] = g[first & ~3] | (g[(first & ~3) + 1] << 8) | (g[(first & ~3) + 2] << 16) | (g[(first & ~3) + 3] << 24);
+        nand3g_guard[7] = (uint32_t)rc;
+    }
+    nand3g_guard[0]++;
+    nand3g_guard_fill();
+}
 static bool nand3g_hw_ready[NAND3G_NUM_CTRL];
 
 /* Wait until all bits in 'mask' are set in *reg. 0 on success, -1 on timeout. */
@@ -614,6 +644,7 @@ uint32_t nand_read_page(uint32_t bank, uint32_t page, void* databuffer,
     nand3g_stat_reads++;
 
     int r = nand3g_read_page(NAND3G_CTRL, bank, page, buf, spare3, &raw);
+    nand3g_guard_check(1, page, bank, r);
     if (r < 0) {
         nand3g_stat_errors++;
         mutex_unlock(&nand_mtx);
@@ -695,6 +726,7 @@ uint32_t nand_write_page(uint32_t bank, uint32_t page, void* databuffer,
     nand_last_activity_value = current_tick;
     nand3g_stat_writes++;
     int r = nand3g_write_page(NAND3G_CTRL, bank, page, buf, sp);
+    nand3g_guard_check(2, page, bank, r);
     mutex_unlock(&nand_mtx);
     if (r != 0) { nand3g_stat_write_errors++; return 1; }
     return 0;
@@ -729,6 +761,7 @@ uint32_t nand_block_erase(uint32_t bank, uint32_t page)
     nand_last_activity_value = current_tick;
     nand3g_stat_erases++;
     int r = nand3g_erase_block(NAND3G_CTRL, bank, page / NAND3G_PAGES_PER_BLOCK);
+    nand3g_guard_check(3, page, bank, r);
     mutex_unlock(&nand_mtx);
     if (r != 0) { nand3g_stat_write_errors++; return 1; }
     return 0;
@@ -778,6 +811,7 @@ int nand_device_init(void)
     }
     nand_last_activity_value = current_tick;
     nand_initialized = true;
+    nand3g_guard_fill();
     return (nand_type[0] < 0) ? -1 : 0;
 }
 

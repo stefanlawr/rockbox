@@ -70,6 +70,7 @@ int nand3g_read_id(int ctrl, int ce, uint8_t id[8]);
 int nand3g_erase_block(int c, int ce, uint32_t block);
 int nand3g_write_page(int c, int ce, uint32_t page, const void *data, const uint32_t spare[NAND3G_SPARE_WORDS]);
 extern unsigned nand3g_dbg_wstat;
+extern uint32_t nand3g_guard[8];
 extern int nand3g_write_enable;
 extern unsigned nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors;
 extern unsigned nand3g_dbg_wstep, nand3g_dbg_wfail_stat, nand3g_dbg_wfail_ecc, nand3g_dbg_wfail_sp;
