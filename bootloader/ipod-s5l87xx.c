@@ -2398,7 +2398,15 @@ void main(void)
         filesystem_init();
 
         /* We wait until HDD spins up to check for hold button */
+#ifdef IPOD_NANO3G
+        /* the hold switch state was sampled at power_init(), long before
+           the user could move it after the reset: sample it again now, and
+           also accept a held MENU as the request to boot the OF */
+        pmu_refresh_inputs();
+        if (pmu_holdswitch_locked() || (button_read_device() & BUTTON_MENU)) {
+#else
         if (button_hold()) {
+#endif
 #ifdef SYSCFG_MAX_ENTRIES
             bool lba48 = false;
             struct SysCfg syscfg;

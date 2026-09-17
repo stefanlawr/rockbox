@@ -143,6 +143,7 @@ unsigned short pmu_adc_raw2mv(
         const struct pmu_adc_channel *ch, unsigned short raw);
 
 int pmu_holdswitch_locked(void);
+void pmu_refresh_inputs(void);
 #if CONFIG_CHARGING
 int pmu_firewire_present(void);
 #endif

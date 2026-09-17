@@ -273,6 +273,15 @@ static void pmu_read_inputs(void)
     pmu_input_holdswitch = !(status[1] & D1671_STATUSB_INPUT2);
 }
 
+/* Bootloader use: re-read the hold switch / cable state right before it is
+   consulted (the PMU thread that normally tracks changes is not running
+   there, and pmu_init() sampled the inputs long before the user could
+   move the hold switch). */
+void pmu_refresh_inputs(void)
+{
+    pmu_read_inputs();
+}
+
 static void pmu_eint_isr(struct eic_handler *h)
 {
      eint_unregister(h);
