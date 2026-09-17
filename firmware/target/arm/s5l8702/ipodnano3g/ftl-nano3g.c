@@ -1625,6 +1625,30 @@ static uint32_t ftl_open(void)
             memcpy(&ftl_cxt, ftl_buffer, 0x28C);
             ftl_found_cxtpage = ppb * ftlcxtblock + i;
             ftlcxtfound = 1;
+            /* nano 3G: the OF's context page does not carry the control
+               block list, control page and clean flag at the offsets of
+               this (nano 2G) structure: a clean OF context yields garbage
+               there (seen: 25/32779/25 and 11/30835/11). Only trust the
+               fields below 0xA0 and rebuild the rest: control blocks from
+               the VFL, control page = the page just found (the next write
+               continues right behind it), no pending erase counter dirt. */
+            memcpy(ftl_cxt.ftlctrlblocks, cxt->ftlctrlblocks, sizeof(ftl_cxt.ftlctrlblocks));
+            ftl_cxt.ftlctrlpage = ftl_found_cxtpage;
+            ftl_cxt.erasedirty = 0;
+            ftl_cxt.clean_flag = 1;
+            {
+                /* skip any pages the OF left above its context page so the
+                   dirty mark lands on an empty one; if the block is full,
+                   the next allocation rotates to a fresh block */
+                uint32_t p;
+                for (p = i + 1; p < ppb; p++)
+                {
+                    uint32_t r = ftl_vfl_read(ppb * ftlcxtblock + p, ftl_buffer,
+                                              &ftl_sparebuffer[0], 1, 0);
+                    if (r & 2) break;
+                }
+                ftl_cxt.ftlctrlpage = ppb * ftlcxtblock + p - 1;
+            }
             break;
         }
         else
