@@ -258,16 +258,9 @@ bool dbg_hw_info(void)
                 _DEBUG_PRINTF("last write err %ld sector %lu cnt %lu alloc %lx", (long)ftl_dbg_werr[0],
                               ftl_dbg_werr[1], ftl_dbg_werr[2], ftl_dbg_werr[3]);
                 {
-                    extern unsigned nand3g_stat_reinit, nand3g_stat_reinit_synced, nand3g_stat_flushes;
-                    extern uint32_t nand3g_stat_reinit_rc;
-                    _DEBUG_PRINTF("storage re-init %u synced %u rc %lu flushes %u",
-                                  nand3g_stat_reinit, nand3g_stat_reinit_synced,
-                                  nand3g_stat_reinit_rc, nand3g_stat_flushes);
-                    {
-                        extern uint32_t nand3g_win_info[3];
-                        _DEBUG_PRINTF("export window x%lu start %lu size %lu (MBR units)",
-                                      nand3g_win_info[0], nand3g_win_info[1], nand3g_win_info[2]);
-                    }
+                    extern uint32_t nand3g_win_info[3];
+                    _DEBUG_PRINTF("export window x%lu start %lu size %lu (MBR units)",
+                                  nand3g_win_info[0], nand3g_win_info[1], nand3g_win_info[2]);
                 }
 #ifdef NANO3G_FTL_DIAG
                 extern uint32_t ftl_crumb[24];

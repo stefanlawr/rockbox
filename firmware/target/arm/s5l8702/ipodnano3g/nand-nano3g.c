@@ -908,26 +908,14 @@ static void nand3g_find_window(void)
 #endif
 }
 
-unsigned nand3g_stat_reinit, nand3g_stat_reinit_synced;
-uint32_t nand3g_stat_reinit_rc;
 int nand_init(void)
 {
-    /* Rockbox re-runs storage_init() when entering and leaving USB mode.
-       The FTL is already mounted then and may hold unsynced log state, so
-       sync it rather than mounting again from the (older) on-flash
-       context. The counters show on the FTL debug page. */
+    /* The bootloaders call storage_init() again from their menus, and the
+       FTL must only be mounted once. (With the USB stack the core does
+       not re-run storage_init() around USB mode; it only unmounts and
+       remounts the volumes.) */
     if (ftl_mounted)
-    {
-#if defined(BOOTLOADER)
-        return 0;   /* the bootloaders re-init from their menus; never sync there */
-#else
-        nand3g_stat_reinit++;
-        if (!nand3g_write_enable) return 0;
-        nand3g_stat_reinit_rc = ftl_sync();
-        if (nand3g_stat_reinit_rc == 0) nand3g_stat_reinit_synced++;
-        return nand3g_stat_reinit_rc ? 1 : 0;
-#endif
-    }
+        return 0;
     if (ftl_init()) return 1;
     ftl_mounted = true;
     nand3g_find_window();
@@ -955,10 +943,8 @@ void nand_enable(bool on)
 }
 
 #ifdef HAVE_STORAGE_FLUSH
-unsigned nand3g_stat_flushes;
 int nand_flush(void)
 {
-    nand3g_stat_flushes++;
     return ftl_sync();
 }
 #endif
@@ -1005,21 +991,15 @@ int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
 
 int nand_event(long id, intptr_t data)
 {
-    (void) data;
-#ifndef BOOTLOADER
-    /* Leaving USB mode: commit what the host wrote. With the USB stack the
-       core only unmounts and remounts the volumes (storage_init() is not
-       re-run), so the storage thread's disconnect event is the place; a
-       sync is far too slow for the SCSI command path. */
-    if (id == SYS_USB_DISCONNECTED && ftl_mounted)
-    {
-        nand3g_stat_reinit++;
-        nand3g_stat_reinit_rc = ftl_sync();
-        if (nand3g_stat_reinit_rc == 0) nand3g_stat_reinit_synced++;
-    }
-#else
+    /* Nothing to do when USB mode ends: what the host wrote is on the
+       flash, verified, by the time each write returns, and every mount
+       rebuilds the FTL state from the spare data. Merging the log blocks
+       at that point (ftl_sync) was tried and froze the player for about
+       50 seconds after a 512 KB copy; shutdown does that housekeeping.
+       It must not be done from the SCSI command path either: the host
+       gives up on the command long before a sync finishes. */
     (void) id;
-#endif
+    (void) data;
     return 0;
 }
 

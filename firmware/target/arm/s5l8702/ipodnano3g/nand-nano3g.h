@@ -73,8 +73,6 @@ extern unsigned nand3g_dbg_wstat;
 extern uint32_t nand3g_guard[8];
 extern int nand3g_write_enable;
 extern unsigned nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors;
-extern unsigned nand3g_stat_reinit, nand3g_stat_reinit_synced, nand3g_stat_flushes;
-extern uint32_t nand3g_stat_reinit_rc;
 extern uint32_t nand3g_win_info[3];
 extern unsigned nand3g_dbg_wstep, nand3g_dbg_wfail_stat, nand3g_dbg_wfail_ecc, nand3g_dbg_wfail_sp;
 int nand3g_read_page(int ctrl, int ce, uint32_t page,

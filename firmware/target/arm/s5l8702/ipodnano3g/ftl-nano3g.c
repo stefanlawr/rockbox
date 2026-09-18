@@ -2838,10 +2838,13 @@ uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t 
 
 /* dev: VFL context summary for a bank into out[16] */
 #if !defined(BOOTLOADER) && defined(NANO3G_FTL_DIAG)
-/* Memory watchdog for the context corruption hunt: with writes disabled
-   the FTL never touches ftl_cxt, ftl_map or the VFL contexts after the
-   mount, so any change seen by this tick task is corruption by someone
-   else. Records the first change (tick, region, offset, old/new word). */
+/* Memory watchdog: a copy of ftl_cxt, ftl_map and the VFL contexts taken
+   at mount time, compared against the live state whenever the FTL debug
+   page is shown (the tick task registration is disabled, see
+   FTL_NANO3G_NO_WATCH_TICK). With the FTL idle any difference is memory
+   corruption by someone else; with writes going on the sequence counters
+   change and the first change is recorded (tick, region, offset, old/new
+   word). */
 static uint8_t watch_cxt[sizeof(struct ftl_cxt_type)];
 static uint16_t watch_map[0x2000];
 static uint8_t watch_vfl[2][0x800];
