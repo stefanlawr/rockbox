@@ -720,7 +720,7 @@ uint32_t nand_read_page_fast(uint32_t page, void* databuffer,
    in-memory FTL context corruption seen at the first NOR-booted shutdown
    (control block list 25/32779/25 written into a clean context) is being
    hunted with the FTL debug page. */
-#ifdef BOOTLOADER
+#if defined(BOOTLOADER) || defined(NANO3G_WRITES_OFF)
 int nand3g_write_enable = 0;
 #else
 int nand3g_write_enable = 1;   /* guarded DMA buffer + watchdog in place */

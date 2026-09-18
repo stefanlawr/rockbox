@@ -2827,6 +2827,38 @@ uint32_t ftl_nano3g_mark_unclean(void)
 }
 #endif
 
+/* dev, read-only: where a logical sector lives and what its page looks
+   like. out[0] mapped vBlock, [1] log vBlock or 0xFFFF, [2] vPage used,
+   [3] raw read result, [4] lpn, [5] usn, [6] type, [7] eccmark,
+   [8] first four data bytes, [9] bytes 510/511 */
+void ftl_nano3g_sector_info(uint32_t sector, uint32_t *out)
+{
+    uint32_t block = sector / ppb, page = sector % ppb;
+    uint32_t abspage, logvb = 0xFFFF, ret;
+    mutex_lock(&ftl_mtx);
+    abspage = ftl_map[block] * ppb + page;
+#ifndef FTL_READONLY
+    {
+        uint32_t i;
+        for (i = 0; i < 0x11; i++)
+            if (ftl_log[i].scatteredvblock != 0xFFFF
+             && ftl_log[i].logicalvblock == block)
+            {
+                logvb = ftl_log[i].scatteredvblock;
+                if (ftl_log[i].pageoffsets[page] != 0xFFFF)
+                    abspage = logvb * ppb + ftl_log[i].pageoffsets[page];
+            }
+    }
+#endif
+    ret = ftl_vfl_read(abspage, ftl_buffer, &ftl_sparebuffer[0], 1, 1);
+    out[0] = ftl_map[block]; out[1] = logvb; out[2] = abspage; out[3] = ret;
+    out[4] = ftl_sparebuffer[0].user.lpn; out[5] = ftl_sparebuffer[0].user.usn;
+    out[6] = ftl_sparebuffer[0].user.type; out[7] = ftl_sparebuffer[0].user.eccmark;
+    out[8] = ftl_buffer[0] | (ftl_buffer[1] << 8) | (ftl_buffer[2] << 16) | ((uint32_t)ftl_buffer[3] << 24);
+    out[9] = ftl_buffer[510] | (ftl_buffer[511] << 8);
+    mutex_unlock(&ftl_mtx);
+}
+
 /* dev: raw read of a vPage, returns ret and fills lpn/usn/type */
 uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t *type, uint8_t *first)
 {

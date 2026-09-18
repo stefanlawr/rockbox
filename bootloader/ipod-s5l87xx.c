@@ -1684,6 +1684,273 @@ end:
 }
 #endif /* NANO3G_FTL_DIAG */
 
+
+/* one sector buffer shared by the read-only dev probes (IRAM is tight) */
+static uint8_t dev_secbuf[SECTOR_SIZE] STORAGE_ALIGN_ATTR;
+
+/* Read-only: look at the start of the FAT partition (boot sector, FSInfo,
+   the backup boot sector at +6 and FSInfo at +7, in 4096-byte units) and
+   scan the logical blocks around it for unreadable pages. */
+static void fat_boot_probe(void)
+{
+    uint8_t *sec = dev_secbuf;
+    extern void ftl_nano3g_sector_info(uint32_t sector, uint32_t *out);
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("FAT boot area probe (read-only)");
+    int rc = nand_init();
+    if (rc) { printf("nand_init %d", rc); goto end; }
+    if (ftl_read(0, 1, sec) != 0 || sec[510] != 0x55 || sec[511] != 0xAA) { printf("no MBR"); goto end; }
+    uint32_t lba = 0;
+    for (int p = 0; p < 4; p++) {
+        const uint8_t *e = &sec[0x1BE + 16 * p];
+        if (e[4] == 0x0B || e[4] == 0x0C) { lba = e[8] | (e[9] << 8) | (e[10] << 16) | ((uint32_t)e[11] << 24); break; }
+    }
+    if (!lba) { printf("no FAT32 entry"); goto end; }
+    uint32_t base = lba * 2;
+    printf("FAT at sector %lu (lBlock %lu page %lu)", (unsigned long)base,
+           (unsigned long)(base / 1024), (unsigned long)(base % 1024));
+    static const uint8_t offs[] = { 0, 1, 2, 3, 12, 13, 14, 15 };
+    for (unsigned k = 0; k < sizeof(offs); k++) {
+        uint32_t o[10];
+        ftl_nano3g_sector_info(base + offs[k], o);
+        printf("+%u vb %lu lg %lx ret %lx lpn %lx t %lx e %lx d %08lx s %04lx", offs[k],
+               (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[3], (unsigned long)o[4],
+               (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9]);
+    }
+    /* scan the lBlock holding the boot sector and its neighbours */
+    for (uint32_t blk = base / 1024 - 1; blk <= base / 1024 + 2; blk++) {
+        uint32_t bad = 0, empty = 0, first = 0xFFFF, last = 0;
+        for (uint32_t pg = 0; pg < 1024; pg++) {
+            uint32_t o[10];
+            ftl_nano3g_sector_info(blk * 1024 + pg, o);
+            if (o[3] & 2) { empty++; continue; }
+            if ((o[3] & 0x11D) || o[7] != 0xFF) { bad++; if (first == 0xFFFF) first = pg; last = pg; }
+        }
+        printf("lBlock %lu: bad %lu (pages %lu..%lu) empty %lu", (unsigned long)blk,
+               (unsigned long)bad, (unsigned long)first, (unsigned long)last, (unsigned long)empty);
+    }
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+
+/* Read-only: find every vBlock on the flash that holds pages of the lBlock
+   containing the FAT boot sector, then rebuild the FTL state in RAM only
+   (forced restore, nothing is written) and look at the boot sector again. */
+static void lblock_find_probe(void)
+{
+    extern void ftl_nano3g_sector_info(uint32_t sector, uint32_t *out);
+    extern uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t *type, uint8_t *first);
+    extern uint32_t ftl_nano3g_force_restore(void);
+    uint8_t *sec = dev_secbuf;
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("lBlock finder + RAM-only restore (read-only)");
+    int rc = nand_init();
+    if (rc) { printf("nand_init %d", rc); goto end; }
+    if (ftl_read(0, 1, sec) != 0) { printf("no MBR"); goto end; }
+    uint32_t lba = 0;
+    for (int p = 0; p < 4; p++) {
+        const uint8_t *e = &sec[0x1BE + 16 * p];
+        if (e[4] == 0x0B || e[4] == 0x0C) { lba = e[8] | (e[9] << 8) | (e[10] << 16) | ((uint32_t)e[11] << 24); break; }
+    }
+    if (!lba) { printf("no FAT32 entry"); goto end; }
+    uint32_t base = lba * 2, want = base / 1024, found = 0;
+    uint32_t nblocks = ftl_nand_type->userblocks + 24;
+    printf("looking for lBlock %lu in vBlocks 1..%lu", (unsigned long)want, (unsigned long)(nblocks - 1));
+    for (uint32_t v = 1; v < nblocks; v++) {
+        uint32_t lpn, usn, type, r; uint8_t f[4];
+        static const uint16_t tryp[3] = { 0, 1, 1023 };
+        for (int t = 0; t < 3; t++) {
+            r = ftl_nano3g_peek(v * 1024 + tryp[t], &lpn, &usn, &type, f);
+            if (r & 2) continue;                       /* empty page */
+            if ((r & 0x11D) || (type != 0x40 && type != 0x41)) break;
+            if (lpn / 1024 != want) break;
+            {
+                /* count used pages and the usn range */
+                uint32_t used = 0, umin = 0xFFFFFFFF, umax = 0, seq = 1, l2, u2, t2;
+                for (uint32_t pg = 0; pg < 1024; pg++) {
+                    uint32_t r2 = ftl_nano3g_peek(v * 1024 + pg, &l2, &u2, &t2, f);
+                    if (r2 & 2) continue;
+                    if (r2 & 0x11D) continue;
+                    used++;
+                    if (u2 < umin) umin = u2;
+                    if (u2 > umax) umax = u2;
+                    if (l2 % 1024 != pg) seq = 0;
+                }
+                if (found < 8)
+                    printf("vb %lu used %lu seq %lu usn %lx..%lx", (unsigned long)v,
+                           (unsigned long)used, (unsigned long)seq, (unsigned long)umin, (unsigned long)umax);
+                found++;
+            }
+            break;
+        }
+    }
+    printf("blocks holding lBlock %lu: %lu", (unsigned long)want, (unsigned long)found);
+    {
+        uint32_t o[10];
+        ftl_nano3g_sector_info(base, o);
+        printf("before: map vb %lu ret %lx", (unsigned long)o[0], (unsigned long)o[3]);
+        uint32_t rrc = ftl_nano3g_force_restore();
+        ftl_nano3g_sector_info(base, o);
+        printf("RAM restore rc %lu: map vb %lu log %lx ret %lx e %lx", (unsigned long)rrc,
+               (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[3], (unsigned long)o[7]);
+        rc = ftl_read(base, 1, sec);
+        printf("boot sector rc %d %02x%02x%02x oem %c%c%c%c%c%c%c%c bps %u sig %02x%02x", rc,
+               sec[0], sec[1], sec[2], sec[3], sec[4], sec[5], sec[6], sec[7], sec[8], sec[9], sec[10],
+               sec[11] | (sec[12] << 8), sec[510], sec[511]);
+        rc = ftl_read(base + 12, 1, sec);
+        printf("backup     rc %d %02x%02x%02x bps %u sig %02x%02x", rc, sec[0], sec[1], sec[2],
+               sec[11] | (sec[12] << 8), sec[510], sec[511]);
+        printf("writes %u erases %u (must be 0)", nand3g_stat_writes, nand3g_stat_erases);
+    }
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+
+/* Read-only: who owns the physical blocks around the "vBlock 0 / vBlock 1959"
+   question. For both dies, page 0 and page 127 of physical blocks 3918, 3919
+   (lower half of our vBlock 1959, = base - 2, base - 1 of the reserved-block
+   substitution), 4096, 4097 (upper half of vBlock 0) and 8014, 8015 (upper
+   half of our vBlock 1959): result, lpn (as lBlock:offset), usn, type. */
+static void vblock0_probe(void)
+{
+    static const uint16_t pb[6] = { 3918, 3919, 4096, 4097, 8014, 8015 };
+    uint8_t *sec = dev_secbuf;
+    uint32_t spare[16];
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("vBlock 0 / 1959 ownership probe (read-only)");
+    int rc = nand_init();
+    if (rc) { printf("nand_init %d", rc); goto end; }
+    for (int k = 0; k < 6; k++)
+        for (uint32_t die = 0; die < 2; die++) {
+            uint32_t r[2], l[2], u[2], t[2];
+            for (int e = 0; e < 2; e++) {
+                uint32_t page = pb[k] * 128 + (e ? 127 : 0);
+                memset(spare, 0xFF, sizeof(spare));
+                r[e] = nand_read_page(die, page, sec, spare, 1, 1);
+                l[e] = spare[0]; u[e] = spare[1]; t[e] = (spare[2] >> 8) & 0xFF;
+            }
+            printf("p%u d%lu: %lx %lu:%lu u%lx t%lx | %lx %lu:%lu u%lx t%lx", pb[k], (unsigned long)die,
+                   (unsigned long)r[0], (unsigned long)(l[0] / 1024), (unsigned long)(l[0] % 1024),
+                   (unsigned long)u[0], (unsigned long)t[0],
+                   (unsigned long)r[1], (unsigned long)(l[1] / 1024), (unsigned long)(l[1] % 1024),
+                   (unsigned long)u[1], (unsigned long)t[1]);
+        }
+    printf("writes %u erases %u (must be 0)", nand3g_stat_writes, nand3g_stat_erases);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
+
+/* WRITES (after a confirmation): complete the OF's vBlock 0 for the lBlock
+   that Rockbox placed in "vBlock 1959". Both share physical 3918/3919 as the
+   lower half; Rockbox put the upper half into 8014/8015, the OF expects it
+   in 4096/4097, which are erased. Copies 8014 -> 4096 and 8015 -> 4097 on
+   both dies, page by page with the spare words, into EMPTY pages only, and
+   reads every page back. Nothing is erased and nothing is overwritten. */
+static void vblock0_repair(void)
+{
+    static const uint16_t srcb[2] = { 8014, 8015 }, dstb[2] = { 4096, 4097 };
+    static uint8_t rb[SECTOR_SIZE] STORAGE_ALIGN_ATTR;
+    uint8_t *sec = dev_secbuf;
+    uint32_t spare[16], spare2[16];
+    uint32_t want = 0xFFFFFFFF, checked = 0, copied = 0;
+    lcd_clear_display(); lcd_set_foreground(LCD_WHITE); line = 0;
+    printf("vBlock 0 repair: copy 8014/8015 -> 4096/4097");
+    int rc = nand_init();
+    if (rc) { printf("nand_init %d", rc); goto end; }
+
+    /* pass 1: checks only */
+    for (int pl = 0; pl < 2; pl++)
+        for (uint32_t die = 0; die < 2; die++)
+            for (uint32_t pg = 0; pg < 128; pg++) {
+                uint32_t vbank = 4 + 2 * pl + die;
+                memset(spare, 0xFF, sizeof(spare));
+                uint32_t r = nand_read_page(die, srcb[pl] * 128 + pg, sec, spare, 1, 1);
+                uint32_t type = (spare[2] >> 8) & 0xFF;
+                if ((r & 0x11F) || (type != 0x40 && type != 0x41)) {
+                    printf("SRC bad: p%u d%lu pg %lu r %lx t %lx", srcb[pl], (unsigned long)die,
+                           (unsigned long)pg, (unsigned long)r, (unsigned long)type);
+                    goto end;
+                }
+                if (want == 0xFFFFFFFF) want = spare[0] / 1024;
+                if (spare[0] / 1024 != want || spare[0] % 1024 != 8 * pg + vbank) {
+                    printf("SRC lpn mismatch: p%u d%lu pg %lu lpn %lx", srcb[pl], (unsigned long)die,
+                           (unsigned long)pg, (unsigned long)spare[0]);
+                    goto end;
+                }
+                r = nand_read_page(die, dstb[pl] * 128 + pg, sec, spare2, 1, 1);
+                if (!(r & 2)) {
+                    printf("DST not empty: p%u d%lu pg %lu r %lx", dstb[pl], (unsigned long)die,
+                           (unsigned long)pg, (unsigned long)r);
+                    goto end;
+                }
+                checked++;
+            }
+    /* the lower half must belong to the same lBlock */
+    for (uint32_t die = 0; die < 2; die++) {
+        memset(spare, 0xFF, sizeof(spare));
+        uint32_t r = nand_read_page(die, 3918 * 128, sec, spare, 1, 1);
+        if ((r & 0x11F) || spare[0] / 1024 != want) { printf("lower half is not lBlock %lu", (unsigned long)want); goto end; }
+    }
+    printf("checks ok: %lu pages, lBlock %lu, targets empty", (unsigned long)checked, (unsigned long)want);
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("PLAY = write 512 pages, MENU = abort");
+    lcd_set_foreground(LCD_WHITE);
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (1) {
+        int bt = button_status();
+        if (bt == BUTTON_MENU) { printf("aborted, nothing written"); goto end; }
+        if (bt == BUTTON_PLAY) break;
+        sleep(HZ/100);
+    }
+
+    /* pass 2: copy + verify */
+    nand3g_write_enable = 1;
+    for (int pl = 0; pl < 2; pl++)
+        for (uint32_t die = 0; die < 2; die++)
+            for (uint32_t pg = 0; pg < 128; pg++) {
+                memset(spare, 0xFF, sizeof(spare));
+                uint32_t r = nand_read_page(die, srcb[pl] * 128 + pg, sec, spare, 1, 0);
+                if (r & 0x11F) { printf("src read failed at p%u d%lu pg %lu", srcb[pl], (unsigned long)die, (unsigned long)pg); goto done; }
+                if (nand_write_page(die, dstb[pl] * 128 + pg, sec, spare, 1)) {
+                    printf("WRITE failed at p%u d%lu pg %lu", dstb[pl], (unsigned long)die, (unsigned long)pg);
+                    goto done;
+                }
+                memset(spare2, 0xFF, sizeof(spare2));
+                r = nand_read_page(die, dstb[pl] * 128 + pg, rb, spare2, 1, 0);
+                if ((r & 0x11F) || memcmp(rb, sec, SECTOR_SIZE) || memcmp(spare, spare2, 12)) {
+                    printf("VERIFY failed at p%u d%lu pg %lu r %lx", dstb[pl], (unsigned long)die,
+                           (unsigned long)pg, (unsigned long)r);
+                    goto done;
+                }
+                copied++;
+            }
+done:
+    nand3g_write_enable = 0;
+    printf("copied and verified %lu of 512 pages", (unsigned long)copied);
+    printf("writes %u erases %u errors %u", nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors);
+end:
+    line++;
+    lcd_set_foreground(LCD_RBYELLOW);
+    printf("Press SELECT to continue");
+    while (button_status() != BUTTON_NONE) sleep(HZ/100);
+    while (button_status() != BUTTON_SELECT) sleep(HZ/100);
+}
+
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
 static volatile uint32_t dma_test_cbs;
@@ -2060,7 +2327,7 @@ static void nand_addr_test(void)
    partition 1 are read through ftl_read(). Nothing is written. */
 static void ftl_mount_test(void)
 {
-    static uint8_t sec[SECTOR_SIZE] STORAGE_ALIGN_ATTR;
+    uint8_t *sec = dev_secbuf;
 
     lcd_clear_display();
     lcd_set_foreground(LCD_WHITE);
@@ -2175,26 +2442,20 @@ static void devel_menu(void)
 #ifdef NANO3G_FTL_DIAG
         "Show write-failure crumb (read-only)",
 #endif
+        "vBlock 0 / 1959 ownership probe (read-only)",
+        "vBlock 0 REPAIR (writes 512 pages after PLAY)",
+        "lBlock finder + RAM restore (read-only)",
+        "FAT boot area probe (read-only)",
         "Mark unclean in current ctrl block (no restore)",
         "VFL state dump (read-only)",
         "Low blocks probe (read-only)",
         "Find displaced pages (read-only)",
         "VFL remap probe (read-only)",
         "NOR chip ID (read-only)",
-        "Erase vblock 631 (garbage copy of lblock 0)",
         "FTL recover: force restore + mark unclean (0x4F)",
-        "FTL write test 2: write + ftl_sync + write (dirty)",
-        "FTL write test 1: rewrite testtone.wav head (no sync)",
-        "NAND write test 1: find erased block (no write)",
-        "NAND write test 2: ERASE+PROGRAM that block",
-        "NAND write test 3: die 1 ERASE+PROGRAM+verify",
-        "DMA playback test (tone via DMA)",
-        "I2S TX test (3 instances)",
-        "I2C scan / codec identify",
         "Block type map (page 0 of every block)",
         "Hexdump DEVICEINFOBBT page",
         "Hexdump VFL cxt page 152",
-        "NAND address cycle test",
         "FTL mount test (read-only)",
         "NAND probe (ctrl 0)",
         "NAND probe (ctrl 1)",
@@ -2221,26 +2482,20 @@ static void devel_menu(void)
 #ifdef NANO3G_FTL_DIAG
         show_crumb,
 #endif
+        vblock0_probe,
+        vblock0_repair,
+        lblock_find_probe,
+        fat_boot_probe,
         mark_unclean_inplace,
         vfl_dump,
         low_blocks_probe,
         find_displaced_probe,
         vfl_remap_probe,
         nor_chip_id,
-        erase_631,
         ftl_recover,
-        ftl_wtest2,
-        ftl_wtest1,
-        nand_wtest_find,
-        nand_wtest_run,
-        nand_wtest_die1,
-        dma_play_test,
-        i2s_tx_test,
-        i2c_scan,
         nand_ftlblock_survey,
         nand_hexdump_devinfo,
         nand_hexdump_ce1_vfl,
-        nand_addr_test,
         ftl_mount_test,
         nand_probe_ctrl0,
         nand_probe_ctrl1,
