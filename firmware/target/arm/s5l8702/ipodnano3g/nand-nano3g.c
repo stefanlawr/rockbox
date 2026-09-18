@@ -110,9 +110,20 @@
    0x14 bytes). The guard absorbs such an overrun and every NAND operation
    checks it (through the uncached alias, DMA bypasses the cache) so the
    offending operation and the overrun length are recorded. */
+#ifdef NANO3G_FTL_DIAG
 #define NAND3G_GUARD_SZ 8192
+#else
+#define NAND3G_GUARD_SZ 0
+#endif
 static uint8_t nand3g_buf[NAND3G_PAGE_SIZE + NAND3G_GUARD_SZ] STORAGE_ALIGN_ATTR;
 uint32_t nand3g_guard[8]; /* violations, op(1r 2w 3e), page, ce, first off, last off, first word, rc */
+#ifndef NANO3G_FTL_DIAG
+static inline void nand3g_guard_fill(void) {}
+static inline void nand3g_guard_check(uint32_t op, uint32_t page, uint32_t ce, int rc)
+{
+    (void)op; (void)page; (void)ce; (void)rc;
+}
+#else
 static void nand3g_guard_fill(void)
 {
     uint8_t *base = nand3g_buf; volatile uint8_t *g = S5L8702_UNCACHED_ADDR(base) + NAND3G_PAGE_SIZE;
@@ -135,6 +146,7 @@ static void nand3g_guard_check(uint32_t op, uint32_t page, uint32_t ce, int rc)
     nand3g_guard[0]++;
     nand3g_guard_fill();
 }
+#endif /* NANO3G_FTL_DIAG */
 static bool nand3g_hw_ready[NAND3G_NUM_CTRL];
 
 /* Wait until all bits in 'mask' are set in *reg. 0 on success, -1 on timeout. */
@@ -824,21 +836,101 @@ int nand_device_init(void)
  * ---------------------------------------------------------------------- */
 
 static bool ftl_mounted;
+
+/* Export only the FAT partition as the storage device (a "superfloppy"),
+   the way Apple's disk mode does. The MBR on the flash names the Apple
+   firmware area (type 0x63, 160 MB) as a second partition, which Windows
+   then offers to format whenever Rockbox is connected over USB. Rockbox
+   has no use for that area (the bootloader loads rockbox.ipod from the
+   FAT volume), so the window below hides it from the file system code and
+   from USB hosts alike, and a host can never write outside the FAT
+   partition. Set NAND3G_EXPORT_FAT_ONLY to 0 to export the whole flash
+   (raw disk images through Rockbox's USB mode then include the MBR and the
+   firmware partition again). */
+#ifndef NAND3G_EXPORT_FAT_ONLY
+#define NAND3G_EXPORT_FAT_ONLY 1
+#endif
+static sector_t nand3g_win_start;   /* SECTOR_SIZE units */
+static sector_t nand3g_win_size;
+uint32_t nand3g_win_info[3];        /* debug: MBR unit multiplier, entry start, entry size */
+static uint8_t nand3g_win_buf[SECTOR_SIZE] STORAGE_ALIGN_ATTR;
+
+static uint32_t nand3g_le32(const uint8_t *p)
+{
+    return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void nand3g_find_window(void)
+{
+    uint32_t total = ftl_nand_type->userblocks * 8 * ftl_nand_type->pagesperblock;
+    uint32_t start[4], size[4];
+    uint8_t type[4];
+    uint32_t i, m;
+
+    nand3g_win_start = 0;
+    nand3g_win_size = total;
+    nand3g_win_info[0] = nand3g_win_info[1] = nand3g_win_info[2] = 0;
+#if NAND3G_EXPORT_FAT_ONLY
+    if (ftl_read(0, 1, nand3g_win_buf) != 0) return;
+    if (nand3g_win_buf[510] != 0x55 || nand3g_win_buf[511] != 0xAA) return;
+    for (i = 0; i < 4; i++)
+    {
+        const uint8_t *e = nand3g_win_buf + 0x1BE + 16 * i;
+        type[i] = e[4];
+        start[i] = nand3g_le32(e + 8);
+        size[i] = nand3g_le32(e + 12);
+    }
+    for (i = 0; i < 4; i++)
+    {
+        if ((type[i] != 0x0B && type[i] != 0x0C) || start[i] == 0 || size[i] == 0)
+            continue;
+        /* The MBR entries are in the OF's units (4096-byte sectors on the
+           MB245), the FTL's are SECTOR_SIZE: find the FAT boot sector at
+           the candidate offsets and check its bytes-per-sector agrees. */
+        for (m = MAX_VIRT_SECTOR_SIZE / SECTOR_SIZE; m >= 1; m >>= 1)
+        {
+            sector_t s = (sector_t)start[i] * m;
+            const uint8_t *b = nand3g_win_buf;
+            if (s >= total || ftl_read(s, 1, nand3g_win_buf) != 0) continue;
+            if (b[510] != 0x55 || b[511] != 0xAA) continue;
+            if (b[0] != 0xEB && b[0] != 0xE9) continue;
+            if ((uint32_t)(b[11] | (b[12] << 8)) != SECTOR_SIZE * m) continue;
+            nand3g_win_start = s;
+            nand3g_win_size = (sector_t)size[i] * m;
+            if (nand3g_win_start + nand3g_win_size > total)
+                nand3g_win_size = total - nand3g_win_start;
+            nand3g_win_info[0] = m; nand3g_win_info[1] = start[i]; nand3g_win_info[2] = size[i];
+            return;
+        }
+    }
+#else
+    (void)start; (void)size; (void)type; (void)i; (void)m;
+#endif
+}
+
+unsigned nand3g_stat_reinit, nand3g_stat_reinit_synced;
+uint32_t nand3g_stat_reinit_rc;
 int nand_init(void)
 {
-    /* Rockbox re-runs storage_init() when leaving USB mode. The FTL is
-       already mounted then and holds unsynced log state, so sync it rather
-       than mounting again from the (older) on-flash context. */
+    /* Rockbox re-runs storage_init() when entering and leaving USB mode.
+       The FTL is already mounted then and may hold unsynced log state, so
+       sync it rather than mounting again from the (older) on-flash
+       context. The counters show on the FTL debug page. */
     if (ftl_mounted)
     {
 #if defined(BOOTLOADER)
         return 0;   /* the bootloaders re-init from their menus; never sync there */
 #else
-        return nand3g_write_enable ? (ftl_sync() ? 1 : 0) : 0;
+        nand3g_stat_reinit++;
+        if (!nand3g_write_enable) return 0;
+        nand3g_stat_reinit_rc = ftl_sync();
+        if (nand3g_stat_reinit_rc == 0) nand3g_stat_reinit_synced++;
+        return nand3g_stat_reinit_rc ? 1 : 0;
 #endif
     }
     if (ftl_init()) return 1;
     ftl_mounted = true;
+    nand3g_find_window();
     return 0;
 }
 
@@ -863,8 +955,10 @@ void nand_enable(bool on)
 }
 
 #ifdef HAVE_STORAGE_FLUSH
+unsigned nand3g_stat_flushes;
 int nand_flush(void)
 {
+    nand3g_stat_flushes++;
     return ftl_sync();
 }
 #endif
@@ -875,7 +969,8 @@ int nand_read_sectors(IF_MD(int drive,) sector_t start, int incount,
 #ifdef HAVE_MULTIDRIVE
     (void) drive;
 #endif
-    return ftl_read(start, incount, inbuf);
+    if (start + incount > nand3g_win_size || start + incount < start) return -1;
+    return ftl_read(start + nand3g_win_start, incount, inbuf);
 }
 
 /* Read-only phase: writes are accepted and discarded. Returning an error
@@ -896,10 +991,11 @@ int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
         nand3g_stat_dropped_writes += count;
         return 0;
     }
+    if (start + count > nand3g_win_size || start + count < start) return -1;
     {
-        uint32_t rc = ftl_write(start, count, outbuf);
+        uint32_t rc = ftl_write(start + nand3g_win_start, count, outbuf);
         if (rc == 0) return 0;
-#if !defined(BOOTLOADER)
+#if !defined(BOOTLOADER) && defined(NANO3G_FTL_DIAG)
         extern void ftl_nano3g_crumb_write(int code, uint32_t sector, uint32_t count);
         ftl_nano3g_crumb_write((int)rc, start, count);
 #endif
@@ -920,9 +1016,8 @@ void nand_get_info(IF_MD(int drive,) struct storage_info *info)
     IF_MD((void)drive);
     /* ftl_nand_type is the FTL's virtual geometry: 8-way interleaved
        superblocks of pagesperblock * 8 pages (see ftl-nano3g.c). */
-    uint32_t ppb = 8 * ftl_nand_type->pagesperblock;
     info->sector_size = SECTOR_SIZE;
-    info->num_sectors = ftl_nand_type->userblocks * ppb;
+    info->num_sectors = nand3g_win_size;   /* the FAT partition, see nand3g_find_window() */
     info->vendor = "Apple";
     info->product = "iPod nano 3G";
     info->revision = "1.0";

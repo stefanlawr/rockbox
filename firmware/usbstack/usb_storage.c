@@ -111,6 +111,7 @@
 #define SCSI_READ_10              0x28
 #define SCSI_WRITE_10             0x2a
 #define SCSI_START_STOP_UNIT      0x1b
+#define SCSI_SYNCHRONIZE_CACHE    0x35
 #define SCSI_REPORT_LUNS          0xa0
 #define SCSI_WRITE_BUFFER         0x3b
 
@@ -1016,9 +1017,22 @@ static void handle_scsi(struct command_block_wrapper* cbw)
                     {
                         logf("scsi eject");
                         ejected[lun]=true;
+#ifdef HAVE_STORAGE_FLUSH
+                        /* the host is done with the medium: commit what it
+                           wrote (flash FTLs keep it in log blocks until then) */
+                        storage_flush();
+#endif
                     }
                 }
             }
+            send_csw(UMS_STATUS_GOOD);
+            break;
+
+        case SCSI_SYNCHRONIZE_CACHE:
+            logf("scsi synchronize_cache %d",lun);
+#ifdef HAVE_STORAGE_FLUSH
+            storage_flush();
+#endif
             send_csw(UMS_STATUS_GOOD);
             break;
 

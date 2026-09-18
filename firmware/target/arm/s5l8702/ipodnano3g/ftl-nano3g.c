@@ -2837,7 +2837,7 @@ uint32_t ftl_nano3g_peek(uint32_t vpage, uint32_t *lpn, uint32_t *usn, uint32_t 
 }
 
 /* dev: VFL context summary for a bank into out[16] */
-#if !defined(BOOTLOADER)
+#if !defined(BOOTLOADER) && defined(NANO3G_FTL_DIAG)
 /* Memory watchdog for the context corruption hunt: with writes disabled
    the FTL never touches ftl_cxt, ftl_map or the VFL contexts after the
    mount, so any change seen by this tick task is corruption by someone
@@ -2882,7 +2882,7 @@ void ftl_nano3g_watch_arm(void)
 }
 #endif
 
-#if !defined(BOOTLOADER)
+#if !defined(BOOTLOADER) && defined(NANO3G_FTL_DIAG)
 /* Panic breadcrumb: 64 words at the top of DRAM, untouched by the
    bootloader and by Rockbox until audio buffering starts, so a record
    written just before a write-failure panic survives the reset. */
@@ -3038,7 +3038,7 @@ uint32_t ftl_init(void)
     if (ftl_vfl_open() == 0)
         if (ftl_open() == 0)
         {
-#if !defined(BOOTLOADER)
+#if !defined(BOOTLOADER) && defined(NANO3G_FTL_DIAG)
             static bool watch_registered;
             ftl_nano3g_crumb_read();
             ftl_nano3g_watch_arm();

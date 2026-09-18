@@ -88,6 +88,14 @@
    needs to do cleanup on shutdown */
 #define HAVE_STORAGE_FLUSH
 
+/* Bring-up diagnostics for the NAND/FTL path: an 8 KB guard zone behind the
+   NAND DMA buffer checked after every flash operation, a tick-task watchdog
+   over the FTL's in-memory state, and a write-failure breadcrumb at the top
+   of DRAM that the FTL debug page shows after the next boot. Costs about
+   30 KB of RAM and a little CPU time in the tick; drop the define once the
+   port has been in daily use for a while. */
+#define NANO3G_FTL_DIAG
+
 /* The NAND flash has 2048-byte sectors, and is our only storage */
 #define SECTOR_SIZE 2048
 

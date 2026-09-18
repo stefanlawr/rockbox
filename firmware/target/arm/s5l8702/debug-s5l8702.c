@@ -234,6 +234,7 @@ bool dbg_hw_info(void)
             _DEBUG_PRINTF("writes %u erases %u errs %u verified %lu vfail %lu cfail %lu",
                           nand3g_stat_writes, nand3g_stat_erases, nand3g_stat_write_errors,
                           ftl_dbg_verify[3], ftl_dbg_verify[1], ftl_dbg_verify[2]);
+#ifdef NANO3G_FTL_DIAG
             {
                 extern uint32_t ftl_watch[8];
                 extern void ftl_nano3g_watch_poll(void);
@@ -251,10 +252,25 @@ bool dbg_hw_info(void)
                               nand3g_guard[0], nand3g_guard[1], nand3g_guard[2], nand3g_guard[3],
                               nand3g_guard[4], nand3g_guard[5], nand3g_guard[6], (long)nand3g_guard[7]);
             }
+#endif
             {
-                extern uint32_t ftl_crumb[24], ftl_dbg_werr[4];
+                extern uint32_t ftl_dbg_werr[4];
                 _DEBUG_PRINTF("last write err %ld sector %lu cnt %lu alloc %lx", (long)ftl_dbg_werr[0],
                               ftl_dbg_werr[1], ftl_dbg_werr[2], ftl_dbg_werr[3]);
+                {
+                    extern unsigned nand3g_stat_reinit, nand3g_stat_reinit_synced, nand3g_stat_flushes;
+                    extern uint32_t nand3g_stat_reinit_rc;
+                    _DEBUG_PRINTF("storage re-init %u synced %u rc %lu flushes %u",
+                                  nand3g_stat_reinit, nand3g_stat_reinit_synced,
+                                  nand3g_stat_reinit_rc, nand3g_stat_flushes);
+                    {
+                        extern uint32_t nand3g_win_info[3];
+                        _DEBUG_PRINTF("export window x%lu start %lu size %lu (MBR units)",
+                                      nand3g_win_info[0], nand3g_win_info[1], nand3g_win_info[2]);
+                    }
+                }
+#ifdef NANO3G_FTL_DIAG
+                extern uint32_t ftl_crumb[24];
                 if (ftl_crumb[0])
                 {
                     _DEBUG_PRINTF("CRUMB from last panic: code %ld sector %lu cnt %lu werr %ld alloc %lx",
@@ -265,6 +281,7 @@ bool dbg_hw_info(void)
                     _DEBUG_PRINTF(" watch changes %lu first tick %lu region %lu off %lx %08lx->%08lx",
                                   ftl_crumb[18], ftl_crumb[19], ftl_crumb[20], ftl_crumb[21], ftl_crumb[22], ftl_crumb[23]);
                 }
+#endif
             }
             _DEBUG_PRINTF("guard %lu (%lx) badrelease %lu (%lu) rotations %lu (last %lu->%lu)",
                           ftl_dbg_guard[0], ftl_dbg_guard[1], ftl_dbg_badrelease[0], ftl_dbg_badrelease[1],

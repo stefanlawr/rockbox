@@ -1656,6 +1656,7 @@ static void nor_chip_id(void)
 }
 
 
+#ifdef NANO3G_FTL_DIAG
 /* Read-only: print the write-failure breadcrumb the main firmware leaves at
    the top of DRAM before a dc_writeback panic (see ftl_nano3g_crumb_write). */
 static void show_crumb(void)
@@ -1681,6 +1682,7 @@ end:
     while (button_status() != BUTTON_NONE) sleep(HZ/100);
     while (button_status() != BUTTON_SELECT) sleep(HZ/100);
 }
+#endif /* NANO3G_FTL_DIAG */
 
 static struct dmac_tsk dma_test_tskbuf[4];
 static struct dmac_lli volatile dma_test_llibuf[4] CACHEALIGN_ATTR;
@@ -2170,7 +2172,9 @@ static void devel_menu(void)
 {
     const char *items[] = {
 #ifdef IPOD_NANO3G
+#ifdef NANO3G_FTL_DIAG
         "Show write-failure crumb (read-only)",
+#endif
         "Mark unclean in current ctrl block (no restore)",
         "VFL state dump (read-only)",
         "Low blocks probe (read-only)",
@@ -2214,7 +2218,9 @@ static void devel_menu(void)
     };
     void (*handlers[])(void) = {
 #ifdef IPOD_NANO3G
+#ifdef NANO3G_FTL_DIAG
         show_crumb,
+#endif
         mark_unclean_inplace,
         vfl_dump,
         low_blocks_probe,
