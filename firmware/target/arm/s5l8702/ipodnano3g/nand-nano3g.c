@@ -1005,8 +1005,21 @@ int nand_write_sectors(IF_MD(int drive,) sector_t start, int count,
 
 int nand_event(long id, intptr_t data)
 {
-    (void) id;
     (void) data;
+#ifndef BOOTLOADER
+    /* Leaving USB mode: commit what the host wrote. With the USB stack the
+       core only unmounts and remounts the volumes (storage_init() is not
+       re-run), so the storage thread's disconnect event is the place; a
+       sync is far too slow for the SCSI command path. */
+    if (id == SYS_USB_DISCONNECTED && ftl_mounted)
+    {
+        nand3g_stat_reinit++;
+        nand3g_stat_reinit_rc = ftl_sync();
+        if (nand3g_stat_reinit_rc == 0) nand3g_stat_reinit_synced++;
+    }
+#else
+    (void) id;
+#endif
     return 0;
 }
 
